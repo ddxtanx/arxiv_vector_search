@@ -55,6 +55,8 @@ class DocumentDownloader:
     ) -> list[DownloadedDocument | DownloadError]:
         results: list[DownloadedDocument | DownloadError] = []
         for doc_type, docs in self.documents.items():
+            if len(docs) == 0:
+                continue
             downloader = self.downloaders[doc_type]
             downloader.add_documents(docs)
             results.extend(downloader.batch_download(batch_size=batch_size))

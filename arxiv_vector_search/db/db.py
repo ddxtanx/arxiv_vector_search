@@ -14,6 +14,7 @@ from arxiv_vector_search.documents.url import URLDocument
 from sqlalchemy import create_engine, Engine, delete, update, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import QueuePool
 from scipy.spatial.distance import cosine
 
 
@@ -37,7 +38,14 @@ class Database:
     identifier_to_doc_id: dict[str, int]
 
     def __init__(self, database_url: str):
-        self.engine = create_engine(database_url)
+        self.engine = create_engine(
+            database_url,
+            poolclass=QueuePool,
+            pool_size=20,
+            max_overflow=10,
+            connect_args={"prepare_threshold": None},
+            insertmanyvalues_page_size=10000,
+        )
         self.model_to_embedding_table = {}
         self.identifier_to_doc_id = {}
         self.session = Session(self.engine)
@@ -77,16 +85,12 @@ class Database:
                 {"identifier": doc.identifier, "pdf_type": doc.document_type}
                 for doc in documents
             ]
-            docs = (
-                session.execute(
-                    insert(Document)
-                    .on_conflict_do_nothing(index_elements=["identifier"])
-                    .returning(Document),
-                    values,
-                )
-                .scalars()
-                .all()
-            )
+            docs = session.execute(
+                insert(Document)
+                .on_conflict_do_nothing(index_elements=["identifier"])
+                .returning(Document),
+                values,
+            ).scalars()
             for doc in docs:
                 self.add_to_identifier_cache(doc.identifier, doc.id)
             session.commit()
@@ -133,44 +137,33 @@ class Database:
             model_record = session.execute(
                 select(Model).where(Model.name == model.get_model_name())
             ).scalar_one()
-            missing_metadata = (
-                session.execute(
-                    select(EmbeddingMetadata).where(
-                        EmbeddingMetadata.model_id == model_record.id,
-                        EmbeddingMetadata.state == EmbeddingState.MISSING,
-                    )
+            missing_metadata = session.execute(
+                select(EmbeddingMetadata, Document)
+                .join(EmbeddingMetadata.document)
+                .where(
+                    EmbeddingMetadata.model_id == model_record.id,
+                    EmbeddingMetadata.state == EmbeddingState.MISSING,
                 )
-                .scalars()
-                .all()
-            )
-            doc_ids = [metadata.document_id for metadata in missing_metadata]
-            documents = (
-                session.execute(select(Document).where(Document.id.in_(doc_ids)))
-                .scalars()
-                .all()
-            )
-            pdf_documents: list[PdfDocument] = []
-            for doc in documents:
+            ).scalars()
+            missing_docs = []
+            for metadata in missing_metadata:
+                doc = metadata.document
                 if doc.pdf_type == DocumentType.ARXIV:
-                    pdf_documents.append(ArxivDocument(doc.identifier))
+                    missing_docs.append(ArxivDocument(doc.identifier))
                 elif doc.pdf_type == DocumentType.URL:
-                    pdf_documents.append(URLDocument(doc.identifier))
+                    missing_docs.append(URLDocument(doc.identifier))
                 elif doc.pdf_type == DocumentType.DOI:
-                    pdf_documents.append(DOIDocument(doc.identifier))
-            return pdf_documents
+                    missing_docs.append(DOIDocument(doc.identifier))
+            return missing_docs
 
     def cache_document_identifiers(self, identifiers: list[str]):
-        missing_identifiers = [
+        missing_identifiers = set(
             ident for ident in identifiers if ident not in self.identifier_to_doc_id
-        ]
+        )
         with Session(self.engine) as session:
-            docs = (
-                session.execute(
-                    select(Document).where(Document.identifier.in_(missing_identifiers))
-                )
-                .scalars()
-                .all()
-            )
+            docs = session.execute(
+                select(Document).where(Document.identifier.in_(missing_identifiers))
+            ).scalars()
             self.identifier_to_doc_id.update({doc.identifier: doc.id for doc in docs})
 
     def add_embeddings(self, embeddings: list[Embedding], embedder: Embedder):
@@ -181,46 +174,41 @@ class Database:
             [embedding.document_identifier for embedding in embeddings]
         )
         with Session(self.engine) as session:
-            model_record = session.execute(
-                select(Model).where(Model.name == embedder.get_model_name())
-            ).scalar_one()
-            model_id = model_record.id
-            embedding_vals = [
-                {
-                    "document_id": self.identifier_to_doc_id.get(
-                        embedding.document_identifier
-                    ),
-                    "model_id": model_id,
-                    "page_number": embedding.page_index,
-                    "chunk_number": embedding.chunk_index,
-                    "embedding": embedding.embedding,
-                }
-                for embedding in embeddings
-            ]
-            session.execute(insert(EmbeddingType), embedding_vals)
+            session.bulk_insert_mappings(
+                EmbeddingType,
+                (
+                    {
+                        "document_id": self.identifier_to_doc_id.get(
+                            embedding.document_identifier
+                        ),
+                        "page_number": embedding.page_index,
+                        "chunk_number": embedding.chunk_index,
+                        "embedding": embedding.embedding,
+                    }
+                    for embedding in embeddings
+                ),
+            )
             session.commit()
 
     def update_embedding_metadata_states(
-        self, embedder: Embedder, updates: list[tuple[PdfDocument, EmbeddingState]]
+        self, embedder: Embedder, documents: list[PdfDocument], state: EmbeddingState
     ):
-        doc_identifiers = [update[0].identifier for update in updates]
+        doc_identifiers = [doc.identifier for doc in documents]
         self.cache_document_identifiers(doc_identifiers)
         with Session(self.engine) as session:
             model_record = session.execute(
                 select(Model).where(Model.name == embedder.get_model_name())
             ).scalar_one()
             model_id = model_record.id
-            update_objs = [
-                {
-                    "document_id": self.identifier_to_doc_id.get(update[0].identifier),
-                    "model_id": model_id,
-                    "state": update[1],
-                }
-                for update in updates
-            ]
+            doc_ids = set(
+                self.identifier_to_doc_id.get(identifier)
+                for identifier in doc_identifiers
+            )
             session.execute(
-                update(EmbeddingMetadata),
-                update_objs,
+                update(EmbeddingMetadata)
+                .where(EmbeddingMetadata.model_id == model_id)
+                .where(EmbeddingMetadata.document_id.in_(doc_ids))
+                .values(state=state)
             )
             session.commit()
 
@@ -273,19 +261,15 @@ class Database:
             ).scalar_one()
             model_id = model_record.id
             # get documents that have no embedding metadata entries with document and model ids corresponding to given
-            missing_docs = (
-                session.execute(
-                    select(Document).where(
-                        ~Document.id.in_(
-                            select(EmbeddingMetadata.document_id).where(
-                                EmbeddingMetadata.model_id == model_id
-                            )
+            missing_docs = session.execute(
+                select(Document).where(
+                    ~Document.id.in_(
+                        select(EmbeddingMetadata.document_id).where(
+                            EmbeddingMetadata.model_id == model_id
                         )
                     )
                 )
-                .scalars()
-                .all()
-            )
+            ).scalars()
             new_embedding_metadata = [
                 {
                     "document_id": doc.id,
@@ -310,7 +294,8 @@ class Database:
                 .join(EmbeddingType.document)
                 .order_by(EmbeddingType.embedding.cosine_distance(query_embedding))
                 .limit(top_k)
-            ).all()
+                .execution_options(readonly=True)
+            )
             query_results = []
             for embedding, doc in results:
                 document = None

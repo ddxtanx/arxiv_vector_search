@@ -2,7 +2,7 @@ import enum
 from typing import List
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import String, ForeignKey, SmallInteger, BigInteger
+from sqlalchemy import String, ForeignKey, SmallInteger, BigInteger, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from arxiv_vector_search.documents.document import DocumentType
 
@@ -27,6 +27,7 @@ class Document(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     identifier: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     pdf_type: Mapped[DocumentType] = mapped_column(nullable=False)
+    __table_args__ = (Index("idx_identifier", "identifier"),)
 
 
 class EmbeddingState(enum.Enum):
@@ -40,9 +41,15 @@ class EmbeddingMetadata(Base):
     __tablename__ = "embedding_metadata"
     id: Mapped[int] = mapped_column(primary_key=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"))
+    document: Mapped[Document] = relationship("Document")
     model_id: Mapped[int] = mapped_column(ForeignKey("models.id"))
     model: Mapped[Model] = relationship("Model", back_populates="embedding_metadatas")
     state: Mapped[EmbeddingState] = mapped_column(nullable=False)
+    __table_args__ = (
+        Index("idx_document_model", "document_id", "model_id"),
+        Index("idx_model_id", "model_id"),
+        Index("idx_model_state", "model_id", "state"),
+    )
 
 
 def create_embedding_table(model_name: str, embedding_dim):

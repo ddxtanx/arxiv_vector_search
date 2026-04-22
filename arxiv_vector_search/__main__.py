@@ -1,6 +1,7 @@
 from arxiv_vector_search.documents.document import SplitDocument
 from arxiv_vector_search.db.tables import EmbeddingState
-from arxiv_vector_search.documents.document import DownloadedDocument
+from arxiv_vector_search.documents.document import DownloadedDocument, DocumentType
+from arxiv_vector_search.documents.arxiv import ArxivDownloader
 from .db import Database
 from .processors import Embedder, Embedding, DocumentSplitter
 from .documents import DocumentDownloader
@@ -73,7 +74,7 @@ if __name__ == "__main__":
         help="Whether to update state with the arxiv metadata json file.",
     )
     _ = parser.add_argument(
-        "--add-docs-as-missing",
+        "--add_docs_as_missing",
         action=BooleanOptionalAction,
         help="Whether to add documents in the database that are not yet added as missing, so they will be processed",
     )
@@ -155,19 +156,34 @@ if __name__ == "__main__":
     if args.embed:
         remaining_docs = db.get_missing_embeddings_for_model(embedder)
         downloader = DocumentDownloader()
+        arxiv_downloader = ArxivDownloader()
+        downloader.register_downloader(DocumentType.ARXIV, arxiv_downloader)
         splitter = DocumentSplitter()
         while remaining_docs:
-            batch = remaining_docs[: embedder.batch_size]
-            remaining_docs = remaining_docs[embedder.batch_size :]
+            batch = remaining_docs[: args.batch_size]
+            remaining_docs = remaining_docs[args.batch_size :]
             downloader.add_documents(batch)
+            print(
+                f"Processing batch of {len(batch)} documents. Remaining: {len(remaining_docs)}"
+            )
             downloaded = downloader.batch_download(4 * args.threads)
+            print(
+                f"Downloaded {len(downloaded)} documents. Processing splits and embeddings..."
+            )
             dl_errs = [
                 doc for doc in downloaded if not isinstance(doc, DownloadedDocument)
             ]
-            db.update_embedding_metadata_states(
-                embedder,
-                [(err.document, EmbeddingState.DOWNLOAD_ERROR) for err in dl_errs],
+            # for err in dl_errs:
+            #     print(f"Error downloading document {err.document.identifier}: {err}")
+            print(
+                f"Encountered {len(dl_errs)} download errors. Updating states in database..."
             )
+            if dl_errs:
+                db.update_embedding_metadata_states(
+                    embedder,
+                    [err.document for err in dl_errs],
+                    EmbeddingState.DOWNLOAD_ERROR,
+                )
             downloaded = [
                 doc for doc in downloaded if isinstance(doc, DownloadedDocument)
             ]
@@ -175,14 +191,34 @@ if __name__ == "__main__":
             split_errs = [
                 doc for doc in split_docs if not isinstance(doc, SplitDocument)
             ]
-            db.update_embedding_metadata_states(
-                embedder,
-                [(err.document, EmbeddingState.SPLIT_ERROR) for err in split_errs],
+            print(
+                f"Split documents into {len(split_docs)} chunks. Encountered {len(split_errs)} split errors. Updating states in database..."
             )
+            if split_errs:
+                db.update_embedding_metadata_states(
+                    embedder,
+                    [err.document for err in split_errs],
+                    EmbeddingState.SPLIT_ERROR,
+                )
             split_docs = [doc for doc in split_docs if isinstance(doc, SplitDocument)]
 
+            print(
+                f"Generating embeddings for {len(split_docs)} document chunks. This may take a while..."
+            )
             embeddings = embedder.embed_documents(split_docs)
+            print(
+                f"Generated embeddings for {len(embeddings)} document chunks. Adding to database..."
+            )
             db.add_embeddings(embeddings, embedder)
+            print(
+                f"Embeddings added to database. Updating states for {len(split_docs)} documents to EMBEDDED."
+            )
+            db.update_embedding_metadata_states(
+                embedder,
+                split_docs,
+                EmbeddingState.EMBEDDED,
+            )
+            print("Batch processing complete. Moving on to next batch...")
             downloader.clear_downloaders()
 
     if args.query:

@@ -82,7 +82,7 @@ with Session(engine) as session:
         update(EmbeddingMetadata)
         .where(
             (EmbeddingMetadata.model_id == model_id)
-            & (EmbeddingMetadata.document_id in update_ids)
+            & (EmbeddingMetadata.document_id.in_(update_ids))
         )
         .values(state=EmbeddingState.EMBEDDED)
     )

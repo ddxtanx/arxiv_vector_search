@@ -2,6 +2,8 @@ from pathlib import Path
 import enum
 import pymupdf
 
+pymupdf.TOOLS.mupdf_display_errors(False)
+
 
 class DocumentType(enum.Enum):
     ARXIV = "arxiv"

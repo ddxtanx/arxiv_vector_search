@@ -16,6 +16,7 @@ class ArxivDownloader(Downloader):
         self.client = Client()
         self.bucket = self.client.bucket("arxiv-dataset")
         self.docs = []
+        os.makedirs(self.dl_path, exist_ok=True)
 
     def add_document(self, document: ArxivDocument):
         self.docs.append(document)
