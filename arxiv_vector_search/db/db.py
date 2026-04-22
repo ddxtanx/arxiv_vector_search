@@ -1,3 +1,4 @@
+from sqlalchemy.orm import joinedload
 from .tables import (
     Model,
     Document,
@@ -15,7 +16,6 @@ from sqlalchemy import create_engine, Engine, delete, update, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import QueuePool
-from scipy.spatial.distance import cosine
 
 
 class QueryResult:
@@ -139,7 +139,8 @@ class Database:
             ).scalar_one()
             missing_metadata = session.execute(
                 select(EmbeddingMetadata, Document)
-                .join(EmbeddingMetadata.document)
+                .options(joinedload(EmbeddingMetadata.document))
+                .join(Document, EmbeddingMetadata.document_id == Document.id)
                 .where(
                     EmbeddingMetadata.model_id == model_record.id,
                     EmbeddingMetadata.state == EmbeddingState.MISSING,
@@ -174,9 +175,9 @@ class Database:
             [embedding.document_identifier for embedding in embeddings]
         )
         with Session(self.engine) as session:
-            session.bulk_insert_mappings(
-                EmbeddingType,
-                (
+            session.execute(
+                insert(EmbeddingType),
+                [
                     {
                         "document_id": self.identifier_to_doc_id.get(
                             embedding.document_identifier
@@ -186,7 +187,7 @@ class Database:
                         "embedding": embedding.embedding,
                     }
                     for embedding in embeddings
-                ),
+                ],
             )
             session.commit()
 
@@ -253,6 +254,7 @@ class Database:
                 )
                 .values(state=EmbeddingState.MISSING)
             )
+            session.commit()
 
     def add_missing_metadata(self, embedder: Embedder):
         with Session(self.engine) as session:
@@ -287,17 +289,20 @@ class Database:
         if embedder.get_model_name() not in self.model_to_embedding_table:
             self.create_embedding_table_for_model(embedder)
         EmbeddingType = self.model_to_embedding_table.get(embedder.get_model_name())
+        embedding_col = EmbeddingType.embedding.cosine_distance(query_embedding).label(
+            "distance"
+        )
         with Session(self.engine) as session:
             print("Querying database for similar embeddings...")
             results = session.execute(
-                select(EmbeddingType, Document)
+                select(EmbeddingType, Document, embedding_col)
                 .join(EmbeddingType.document)
-                .order_by(EmbeddingType.embedding.cosine_distance(query_embedding))
+                .order_by(embedding_col)
                 .limit(top_k)
                 .execution_options(readonly=True)
             )
             query_results = []
-            for embedding, doc in results:
+            for embedding, doc, distance in results:
                 document = None
                 if doc.pdf_type == DocumentType.ARXIV:
                     document = ArxivDocument(doc.identifier)
@@ -309,32 +314,7 @@ class Database:
                     QueryResult(
                         document=document,
                         page_number=embedding.page_number,
-                        distance=cosine(embedding.embedding, query_embedding),
+                        distance=distance,
                     )
                 )
             return query_results
-            # print("Retreived results")
-            # doc_ids = [result.document_id for result in results]
-            # documents = session.execute(
-            #     select(Document).where(Document.id.in_(doc_ids))
-            # ).scalars()
-            # print("Retrieved documents for results. Processing results...")
-            # id_to_doc = {}
-            # for doc in documents:
-            #     if doc.pdf_type == DocumentType.ARXIV:
-            #         id_to_doc[doc.id] = ArxivDocument(doc.identifier)
-            #     elif doc.pdf_type == DocumentType.URL:
-            #         id_to_doc[doc.id] = URLDocument(doc.identifier)
-            #     elif doc.pdf_type == DocumentType.DOI:
-            #         id_to_doc[doc.id] = DOIDocument(doc.identifier)
-            # print(
-            #     "Constructed document objects for results. Calculating distances and returning results..."
-            # )
-            # return [
-            #     QueryResult(
-            #         document=id_to_doc.get(result.document_id),
-            #         page_number=result.page_number,
-            #         distance=cosine(result.embedding, query_embedding),
-            #     )
-            #     for result in results
-            # ]

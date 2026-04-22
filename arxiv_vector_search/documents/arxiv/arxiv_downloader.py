@@ -20,6 +20,8 @@ class ArxivDownloader(Downloader):
 
     def add_document(self, document: ArxivDocument):
         self.docs.append(document)
+        for dir in document.get_parent_folders():
+            os.makedirs(os.path.join(self.dl_path, dir), exist_ok=True)
 
     def batch_download(
         self, batch_size: int

@@ -230,14 +230,14 @@ if __name__ == "__main__":
         )
         urls = set(result.document.get_url() for result in results)
         scores: dict[str, list[float]] = {}
-        pages: dict[str, list[int]] = {}
+        pages: dict[str, set[int]] = {}
         for result in results:
             url = result.document.get_url()
             if url not in scores:
                 scores[url] = []
-                pages[url] = []
+                pages[url] = set()
             scores[url].append(result.distance)
-            pages[url].append(result.page_number)
+            pages[url].add(result.page_number)
         sorted_by_min = sorted(
             urls,
             key=lambda url: min(scores[url]),

@@ -45,8 +45,8 @@ class DownloadedDocument(Document):
 
     def get_pages_text(self) -> list[str] | ReadError:
         try:
-            doc = pymupdf.open(self.path)
-            return [page.get_text() for page in doc]
+            with pymupdf.open(self.path) as doc:
+                return [page.get_text() for page in doc]
         except Exception as e:
             return ReadError(document=self, message=str(e))
 
