@@ -34,7 +34,7 @@ class ArxivDownloader(Downloader):
             for doc in self.docs
         ]
         download_results = transfer_manager.download_many(
-            blob_pairs, max_workers=batch_size
+            blob_pairs, max_workers=batch_size, worker_type="thread"
         )
         results: list[DownloadedDocument | DownloadError] = []
         for doc, result in zip(self.docs, download_results):

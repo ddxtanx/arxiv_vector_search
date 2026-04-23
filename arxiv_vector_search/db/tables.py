@@ -1,7 +1,7 @@
 import enum
 from typing import List
 
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import HALFVEC
 from sqlalchemy import String, ForeignKey, SmallInteger, BigInteger, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from arxiv_vector_search.documents.document import DocumentType
@@ -42,12 +42,11 @@ class EmbeddingMetadata(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"))
     document: Mapped[Document] = relationship("Document")
-    model_id: Mapped[int] = mapped_column(ForeignKey("models.id"))
+    model_id: Mapped[int] = mapped_column(ForeignKey("models.id"), index=True)
     model: Mapped[Model] = relationship("Model", back_populates="embedding_metadatas")
     state: Mapped[EmbeddingState] = mapped_column(nullable=False)
     __table_args__ = (
         Index("idx_document_model", "document_id", "model_id"),
-        Index("idx_model_id", "model_id"),
         Index("idx_model_state", "model_id", "state"),
     )
 
@@ -56,11 +55,12 @@ def create_embedding_table(model_name: str, embedding_dim):
     safe_model_name = model_name.replace("/", "-")
     attrs = {
         "__tablename__": f"embeddings_{safe_model_name}",
-        "id": mapped_column(BigInteger, primary_key=True),
-        "document_id": mapped_column(ForeignKey("documents.id")),
+        "document_id": mapped_column(
+            ForeignKey("documents.id"), primary_key=True, index=True
+        ),
         "document": relationship("Document"),
-        "page_number": mapped_column(SmallInteger, nullable=False),
-        "chunk_number": mapped_column(SmallInteger, nullable=False),
-        "embedding": mapped_column(Vector(embedding_dim), nullable=False),
+        "page_number": mapped_column(SmallInteger, nullable=False, primary_key=True),
+        "chunk_number": mapped_column(SmallInteger, nullable=False, primary_key=True),
+        "embedding": mapped_column(HALFVEC(embedding_dim), nullable=False),
     }
     return type(f"Embedding_{safe_model_name}", (Base,), attrs)
