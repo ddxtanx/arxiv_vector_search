@@ -10,31 +10,24 @@ from arxiv_vector_search.documents import DocumentSplitIterator
 SentenceEmbedding: TypeAlias = np.ndarray[tuple[int], np.dtype[np.float16]]
 
 
-def get_params(model_name: str) -> Any:
+def get_params() -> Any:
     base = {
         "device": "cuda",
         "model_kwargs": {"dtype": torch.float16, "attn_implementation": "sdpa"},
         "config_kwargs": {"_attn_implementation": "sdpa"},
     }
-    if (
-        "sentence-transformers" not in model_name
-        and "UAE-Large" not in model_name
-        and "Snowflake/snowflake-arctic-embed-l-v2.0" not in model_name
-    ):
-        base["model_kwargs"]["attn_implementation"] = "flash_attention_2"
-        base["config_kwargs"]["_attn_implementation"] = "flash_attention_2"
-    if "all-mpnet-base-v2" in model_name:
-        del base["model_kwargs"]["attn_implementation"]
-        del base["config_kwargs"]["_attn_implementation"]
     return base
 
 
+torch.backends.cuda.preferred_rocm_fa_library("aotriton")
+
+
 def create_model(model_name: str, **kwargs) -> SentenceTransformer:
-    params = get_params(model_name)
+    params = get_params()
     params.update(kwargs)
     model = SentenceTransformer(model_name, **params)
-    model = torch.compile(
-        model,
+    model[0].auto_model = torch.compile(
+        model[0].auto_model,
         mode="max-autotune",
         fullgraph=True,
     )
@@ -69,11 +62,26 @@ class Embedder:
             indices.append((doc_id, page_index, chunk_index))
             texts.append(text)
 
-        embeddings = self.model.encode(
-            texts,
-            batch_size=self.batch_size,
-            show_progress_bar=True,
-        )
+        with sdpa_kernel(
+            [
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH,
+            ],
+            set_priority=True,
+        ):
+            embeddings = (
+                self.model.encode(
+                    texts,
+                    batch_size=self.batch_size,
+                    show_progress_bar=True,
+                    convert_to_numpy=False,
+                    convert_to_tensor=True,
+                )
+                .half()
+                .cpu()
+                .numpy()
+            )
         for indice, embedding in zip(indices, embeddings):
             doc_id, page_index, chunk_index = indice
             if doc_id not in doc_embeds:
@@ -82,7 +90,7 @@ class Embedder:
                 doc_embeds[doc_id].append([])
             while len(doc_embeds[doc_id][page_index]) <= chunk_index:
                 doc_embeds[doc_id][page_index].append(None)
-            doc_embeds[doc_id][page_index][chunk_index] = embedding.astype(np.float16)
+            doc_embeds[doc_id][page_index][chunk_index] = embedding
 
         return Embeddings(doc_embeds)
 
