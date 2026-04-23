@@ -131,7 +131,9 @@ class Database:
             ).scalar_one()
             return model_record.embedding_metadatas
 
-    def get_missing_embeddings_for_model(self, model: Embedder) -> list[PdfDocument]:
+    def get_missing_embeddings_for_model(
+        self, model: Embedder, limit: int, offset: int
+    ) -> list[PdfDocument]:
         with Session(self.engine) as session:
             model_record = session.execute(
                 select(Model).where(Model.name == model.get_model_name())
@@ -144,6 +146,8 @@ class Database:
                     EmbeddingMetadata.model_id == model_record.id,
                     EmbeddingMetadata.state == EmbeddingState.MISSING,
                 )
+                .limit(limit)
+                .offset(offset)
             ).scalars()
             missing_docs = []
             for metadata in missing_metadata:

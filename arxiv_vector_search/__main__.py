@@ -9,6 +9,7 @@ import sys
 import os
 from argparse import ArgumentParser, BooleanOptionalAction
 from dataclasses import dataclass
+import gc
 
 batch_sizes = {
     "sentence-transformers/all-MiniLM-L6-v2": 512,
@@ -154,19 +155,22 @@ if __name__ == "__main__":
         db.add_missing_metadata(embedder)
 
     if args.embed:
-        remaining_docs = db.get_missing_embeddings_for_model(embedder)
         downloader = DocumentDownloader()
         arxiv_downloader = ArxivDownloader()
         downloader.register_downloader(DocumentType.ARXIV, arxiv_downloader)
         splitter = DocumentSplitter()
-        while remaining_docs:
-            batch = remaining_docs[: args.batch_size]
-            remaining_docs = remaining_docs[args.batch_size :]
-            downloader.add_documents(batch)
-            print(
-                f"Processing batch of {len(batch)} documents. Remaining: {len(remaining_docs)}"
+        offset = 0
+        while True:
+            batch = db.get_missing_embeddings_for_model(
+                embedder, limit=args.batch_size, offset=offset
             )
+            if not batch:
+                break
+            offset += args.batch_size
+            downloader.add_documents(batch)
+            print(f"Processing batch of {len(batch)} documents.")
             downloaded = downloader.batch_download(4 * args.threads)
+            del batch
             print(
                 f"Downloaded {len(downloaded)} documents. Processing splits and embeddings..."
             )
@@ -188,6 +192,8 @@ if __name__ == "__main__":
                 doc for doc in downloaded if isinstance(doc, DownloadedDocument)
             ]
             split_docs = splitter.par_split_documents(downloaded, args.threads)
+            downloader.clear_downloaders()
+            del downloaded
             split_errs = [
                 doc for doc in split_docs if not isinstance(doc, SplitDocument)
             ]
@@ -219,7 +225,9 @@ if __name__ == "__main__":
                 EmbeddingState.EMBEDDED,
             )
             print("Batch processing complete. Moving on to next batch...")
-            downloader.clear_downloaders()
+            del split_docs
+            del embeddings
+            gc.collect()
 
     if args.query:
         query_embedding = embedder.model.encode(args.query)
