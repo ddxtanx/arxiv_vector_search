@@ -8,4 +8,4 @@ proj.txt
 __pycache__
 *.pyc
 arxiv_vector_search_old.py
-tuneableop*.csv
+tunableop*.csv
