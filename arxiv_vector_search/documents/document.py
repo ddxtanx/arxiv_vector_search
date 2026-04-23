@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import TypeVar, Generic
 import enum
 import pymupdf
 
@@ -103,3 +104,52 @@ class SplitDocument(Document):
         )
         self.cur_chunk += 1
         return split_data
+
+
+T = TypeVar("T")
+
+
+class DocumentSplitIterator(Generic[T]):
+    backing_obj: dict[
+        str, list[list[T]]
+    ]  # indexed as [document_id][page_index][chunk_index]
+    document_ids: list[str]
+    cur_doc_index: int
+    cur_page_index: int
+    cur_chunk_index: int
+
+    def __init__(self, backing_obj: dict[str, list[list[T]]]):
+        self.backing_obj = backing_obj
+        self.document_ids = list(backing_obj.keys())
+        self.cur_doc_index = 0
+        self.cur_page_index = 0
+        self.cur_chunk_index = 0
+
+    def __iter__(self):
+        self.cur_doc_index = 0
+        self.cur_page_index = 0
+        self.cur_chunk_index = 0
+        return self
+
+    def __next__(self) -> tuple[str, int, int, T]:
+        if self.cur_doc_index >= len(self.document_ids):
+            raise StopIteration
+        document_id = self.document_ids[self.cur_doc_index]
+        pages = self.backing_obj[document_id]
+        if self.cur_page_index >= len(pages):
+            self.cur_doc_index += 1
+            self.cur_page_index = 0
+            self.cur_chunk_index = 0
+            return self.__next__()
+        page_chunks = pages[self.cur_page_index]
+        if self.cur_chunk_index >= len(page_chunks):
+            self.cur_page_index += 1
+            self.cur_chunk_index = 0
+            return self.__next__()
+        chunk_data = page_chunks[self.cur_chunk_index]
+        if chunk_data is None:
+            raise ValueError(
+                f"Chunk data is None for document {document_id}, page {self.cur_page_index}, chunk {self.cur_chunk_index}"
+            )
+        self.cur_chunk_index += 1
+        return (document_id, self.cur_page_index, self.cur_chunk_index - 1, chunk_data)

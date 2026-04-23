@@ -1,4 +1,5 @@
 from sqlalchemy.orm import joinedload
+import numpy as np
 from .tables import (
     Model,
     Document,
@@ -7,7 +8,7 @@ from .tables import (
     Base,
     EmbeddingState,
 )
-from arxiv_vector_search.processors.embedder import Embedder, Embedding
+from arxiv_vector_search.processors.embedder import Embedder, Embeddings
 from arxiv_vector_search.documents import Document as PdfDocument, DocumentType
 from arxiv_vector_search.documents.arxiv import ArxivDocument
 from arxiv_vector_search.documents.doi import DOIDocument
@@ -160,27 +161,23 @@ class Database:
                     missing_docs.append(DOIDocument(doc.identifier))
             return missing_docs
 
-    def add_embeddings(self, embeddings: list[Embedding], embedder: Embedder):
+    def add_embeddings(self, embeddings: Embeddings, embedder: Embedder):
         if embedder.get_model_name() not in self.model_to_embedding_table:
             self.create_embedding_table_for_model(embedder)
         EmbeddingType = self.model_to_embedding_table.get(embedder.get_model_name())
-        document_identifiers = set(
-            embedding.document_identifier for embedding in embeddings
-        )
+        document_identifiers = set(embeddings.embeddings_dict.keys())
         identifier_to_doc_id = self.get_identifier_to_doc_id(document_identifiers)
         with Session(self.engine) as session:
             session.execute(
                 insert(EmbeddingType),
                 [
                     {
-                        "document_id": identifier_to_doc_id.get(
-                            embedding.document_identifier
-                        ),
-                        "page_number": embedding.page_index,
-                        "chunk_number": embedding.chunk_index,
-                        "embedding": embedding.embedding,
+                        "document_id": identifier_to_doc_id.get(doc_id),
+                        "page_number": page_index,
+                        "chunk_number": chunk_index,
+                        "embedding": embedding,
                     }
-                    for embedding in embeddings
+                    for (doc_id, page_index, chunk_index, embedding) in embeddings
                 ],
             )
             session.commit()
@@ -279,7 +276,10 @@ class Database:
             session.commit()
 
     def query_embeddings(
-        self, embedder: Embedder, query_embedding: list[float], top_k: int
+        self,
+        embedder: Embedder,
+        query_embedding: np.ndarray[tuple[int], np.dtype[np.float16]],
+        top_k: int,
     ) -> list[QueryResult]:
         if embedder.get_model_name() not in self.model_to_embedding_table:
             self.create_embedding_table_for_model(embedder)

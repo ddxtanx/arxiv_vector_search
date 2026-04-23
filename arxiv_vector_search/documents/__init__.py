@@ -5,6 +5,7 @@ from .document import (
     SplitDocument,
     SplitData,
     ReadError,
+    DocumentSplitIterator,
 )
 from .downloader import DocumentDownloader, Downloader, DownloadError
 
@@ -18,5 +19,5 @@ __all__ = [
     "DocumentDownloader",
     "Downloader",
     "DownloadError",
+    "DocumentSplitIterator",
 ]
-

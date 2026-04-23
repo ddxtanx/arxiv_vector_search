@@ -1,7 +1,12 @@
+from typing import TypeAlias
+import numpy as np
 from typing import Any
 import torch
 from sentence_transformers import SentenceTransformer
-from arxiv_vector_search.documents import SplitDocument, SplitData, Document
+from arxiv_vector_search.processors.splitter import Splits
+from arxiv_vector_search.documents import DocumentSplitIterator
+
+SentenceEmbedding: TypeAlias = np.ndarray[tuple[int], np.dtype[np.float16]]
 
 
 def get_params(model_name: str) -> Any:
@@ -29,23 +34,14 @@ def create_model(model_name: str, **kwargs) -> SentenceTransformer:
     return SentenceTransformer(model_name, **params)
 
 
-class Embedding:
-    document_identifier: str
-    page_index: int
-    chunk_index: int
-    embedding: torch.Tensor
+class Embeddings:
+    embeddings_dict: dict[str, list[list[SentenceEmbedding]]]
 
-    def __init__(
-        self,
-        document_identifier: str,
-        page_index: int,
-        chunk_index: int,
-        embedding: torch.Tensor,
-    ):
-        self.document_identifier = document_identifier
-        self.page_index = page_index
-        self.chunk_index = chunk_index
-        self.embedding = embedding
+    def __init__(self, embeddings_dict: dict[str, list[list[SentenceEmbedding]]]):
+        self.embeddings_dict = embeddings_dict
+
+    def __iter__(self):
+        return DocumentSplitIterator[SentenceEmbedding](self.embeddings_dict)
 
 
 class Embedder:
@@ -58,21 +54,32 @@ class Embedder:
         self.model = create_model(model_name, **kwargs)
         self.batch_size = batch_size
 
-    def embed_documents(self, documents: list[SplitDocument]) -> list[Embedding]:
-        splits = [split for doc in documents for split in doc]
-        texts = [split.text for split in splits]
+    def embed_documents(self, splits: Splits) -> Embeddings:
+        doc_embeds: dict[str, list[list[SentenceEmbedding | None]]] = {}
+        indices: list[tuple[str, int, int]] = []
+        texts: list[str] = []
+        for doc_id, page_index, chunk_index, text in splits:
+            indices.append((doc_id, page_index, chunk_index))
+            texts.append(text)
+
+            if doc_id not in doc_embeds:
+                doc_embeds[doc_id] = []
+            while len(doc_embeds[doc_id]) <= page_index:
+                doc_embeds[doc_id].append([])
+            while len(doc_embeds[doc_id][page_index]) <= chunk_index:
+                doc_embeds[doc_id][page_index].append(None)
+
         embeddings = self.model.encode(
-            texts, batch_size=self.batch_size, show_progress_bar=True
+            texts,
+            batch_size=self.batch_size,
+            show_progress_bar=True,
+            convert_to_numpy=True,
         )
-        return [
-            Embedding(
-                document_identifier=split.identifier,
-                page_index=split.page_index,
-                chunk_index=split.chunk_index,
-                embedding=embedding,
-            )
-            for split, embedding in zip(splits, embeddings)
-        ]
+        for indice, embedding in zip(indices, embeddings):
+            doc_id, page_index, chunk_index = indice
+            doc_embeds[doc_id][page_index][chunk_index] = embedding.astype(np.float16)
+
+        return Embeddings(doc_embeds)
 
     def get_model_name(self) -> str:
         return self.model_name

@@ -3,6 +3,7 @@ from arxiv_vector_search.documents import (
     DownloadedDocument,
     SplitDocument,
     ReadError,
+    DocumentSplitIterator,
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter, TextSplitter
 
@@ -21,6 +22,33 @@ class SplitError(Exception):
         self.document = document
         self.message = message
         super().__init__(f"Error splitting document {document.identifier}: {message}")
+
+
+class Splits:
+    split_dict: dict[str, list[list[str]]]
+    errs: list[SplitError | ReadError]
+
+    def __init__(self):
+        self.split_dict = {}
+        self.errs = []
+
+    def add_split_doc(self, split_doc: SplitDocument):
+        self.split_dict[split_doc.identifier] = split_doc.splits
+
+    def add_error(self, error: SplitError | ReadError):
+        self.errs.append(error)
+
+    def __iter__(self):
+        return DocumentSplitIterator[str](self.split_dict)
+
+    def get_errors(self) -> list[SplitError | ReadError]:
+        return self.errs
+
+    def get_num_successful_splits(self) -> int:
+        return len(self.split_dict)
+
+    def get_num_errors(self) -> int:
+        return len(self.errs)
 
 
 class DocumentSplitter:
@@ -53,9 +81,7 @@ class DocumentSplitter:
         except Exception as e:
             raise SplitError(document=document, message=str(e))
 
-    def split_documents(
-        self, documents: list[DownloadedDocument]
-    ) -> list[SplitDocument | ReadError | SplitError]:
+    def split_documents(self, documents: list[DownloadedDocument]) -> Splits:
         results: list[SplitDocument | ReadError | SplitError] = []
         for document in documents:
             try:
@@ -63,11 +89,23 @@ class DocumentSplitter:
                 results.append(split_doc)
             except SplitError | ReadError as e:
                 results.append(e)
-        return results
+        split_obj = Splits()
+        for result in results:
+            if isinstance(result, SplitDocument):
+                split_obj.add_split_doc(result)
+            else:
+                split_obj.add_error(result)
+        return split_obj
 
     def par_split_documents(
         self, documents: list[DownloadedDocument], num_workers: int
-    ) -> list[SplitDocument | SplitError | ReadError]:
+    ) -> Splits:
         with Pool(processes=num_workers) as pool:
             results = pool.map(self.split_document, documents)
-        return results
+        split_obj = Splits()
+        for result in results:
+            if isinstance(result, SplitDocument):
+                split_obj.add_split_doc(result)
+            else:
+                split_obj.add_error(result)
+        return split_obj
