@@ -101,7 +101,7 @@ class DocumentSplitter:
         self, documents: list[DownloadedDocument], num_workers: int
     ) -> Splits:
         with Pool(processes=num_workers) as pool:
-            results = pool.map(self.split_document, documents)
+            results = list(pool.imap(self.split_document, documents))
         split_obj = Splits()
         for result in results:
             if isinstance(result, SplitDocument):

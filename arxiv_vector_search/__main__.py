@@ -158,10 +158,9 @@ if __name__ == "__main__":
         arxiv_downloader = ArxivDownloader()
         downloader.register_downloader(DocumentType.ARXIV, arxiv_downloader)
         splitter = DocumentSplitter()
-        offset = 0
         while True:
             batch = db.get_missing_embeddings_for_model(
-                embedder, limit=args.batch_size, offset=offset
+                embedder, limit=args.batch_size, offset=0
             )
             if not batch:
                 break

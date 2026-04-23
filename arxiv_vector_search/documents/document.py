@@ -51,6 +51,7 @@ class DownloadedDocument(Document):
         except Exception as e:
             return ReadError(document=self, message=str(e))
 
+    @staticmethod
     def from_document(document: Document, path: Path) -> "DownloadedDocument":
         return DownloadedDocument(document.identifier, document.document_type, path)
 

@@ -44,10 +44,8 @@ class Database:
             pool_size=20,
             max_overflow=10,
             connect_args={"prepare_threshold": None},
-            insertmanyvalues_page_size=10000,
         )
         self.model_to_embedding_table = {}
-        self.session = Session(self.engine)
         Base.metadata.create_all(self.engine)
 
     def add_model(self, embedder: Embedder):
@@ -172,7 +170,7 @@ class Database:
                 insert(EmbeddingType),
                 [
                     {
-                        "document_id": identifier_to_doc_id.get(doc_id),
+                        "document_id": identifier_to_doc_id[doc_id],
                         "page_number": page_index,
                         "chunk_number": chunk_index,
                         "embedding": embedding,

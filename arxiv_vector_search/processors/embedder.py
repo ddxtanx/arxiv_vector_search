@@ -62,13 +62,6 @@ class Embedder:
             indices.append((doc_id, page_index, chunk_index))
             texts.append(text)
 
-            if doc_id not in doc_embeds:
-                doc_embeds[doc_id] = []
-            while len(doc_embeds[doc_id]) <= page_index:
-                doc_embeds[doc_id].append([])
-            while len(doc_embeds[doc_id][page_index]) <= chunk_index:
-                doc_embeds[doc_id][page_index].append(None)
-
         embeddings = self.model.encode(
             texts,
             batch_size=self.batch_size,
@@ -77,6 +70,12 @@ class Embedder:
         )
         for indice, embedding in zip(indices, embeddings):
             doc_id, page_index, chunk_index = indice
+            if doc_id not in doc_embeds:
+                doc_embeds[doc_id] = []
+            while len(doc_embeds[doc_id]) <= page_index:
+                doc_embeds[doc_id].append([])
+            while len(doc_embeds[doc_id][page_index]) <= chunk_index:
+                doc_embeds[doc_id][page_index].append(None)
             doc_embeds[doc_id][page_index][chunk_index] = embedding.astype(np.float16)
 
         return Embeddings(doc_embeds)
