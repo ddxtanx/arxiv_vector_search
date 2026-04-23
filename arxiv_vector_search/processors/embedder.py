@@ -2,6 +2,7 @@ from typing import TypeAlias
 import numpy as np
 from typing import Any
 import torch
+from torch.nn.attention import sdpa_kernel, SDPBackend
 from sentence_transformers import SentenceTransformer
 from arxiv_vector_search.processors.splitter import Splits
 from arxiv_vector_search.documents import DocumentSplitIterator
@@ -9,10 +10,32 @@ from arxiv_vector_search.documents import DocumentSplitIterator
 SentenceEmbedding: TypeAlias = np.ndarray[tuple[int], np.dtype[np.float16]]
 
 
+def get_sdpa_context():
+    """Return the best available SDPA backend context for this hardware."""
+    test = torch.randn(1, 1, 4, 64, dtype=torch.float16, device="cuda")
+    try:
+        # Test if FLASH_ATTENTION works on this ROCm build
+
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            torch.nn.functional.scaled_dot_product_attention(test, test, test)
+        return sdpa_kernel(SDPBackend.FLASH_ATTENTION)
+    except RuntimeError:
+        pass
+    try:
+        with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+            torch.nn.functional.scaled_dot_product_attention(test, test, test)
+        return sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION)
+    except RuntimeError:
+        return sdpa_kernel(SDPBackend.MATH)  # always works, slowest
+
+
+sdpa_ctx = get_sdpa_context()
+
+
 def get_params(model_name: str) -> Any:
     base = {
         "device": "cuda",
-        "model_kwargs": {"dtype": torch.bfloat16, "attn_implementation": "sdpa"},
+        "model_kwargs": {"dtype": torch.float16, "attn_implementation": "sdpa"},
         "config_kwargs": {"_attn_implementation": "sdpa"},
     }
     if (
@@ -31,7 +54,13 @@ def get_params(model_name: str) -> Any:
 def create_model(model_name: str, **kwargs) -> SentenceTransformer:
     params = get_params(model_name)
     params.update(kwargs)
-    return SentenceTransformer(model_name, **params)
+    model = SentenceTransformer(model_name, **params)
+    model = torch.compile(
+        model,
+        mode="max-autotune",
+        fullgraph=True,
+    )
+    return model
 
 
 class Embeddings:
@@ -62,12 +91,13 @@ class Embedder:
             indices.append((doc_id, page_index, chunk_index))
             texts.append(text)
 
-        embeddings = self.model.encode(
-            texts,
-            batch_size=self.batch_size,
-            show_progress_bar=True,
-            convert_to_numpy=True,
-        )
+        with sdpa_ctx:
+            embeddings = self.model.encode(
+                texts,
+                batch_size=self.batch_size,
+                show_progress_bar=True,
+                convert_to_numpy=True,
+            )
         for indice, embedding in zip(indices, embeddings):
             doc_id, page_index, chunk_index = indice
             if doc_id not in doc_embeds:

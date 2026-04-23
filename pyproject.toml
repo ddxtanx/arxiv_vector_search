@@ -12,8 +12,7 @@ dependencies = [
   "pgvector",
   "psycopg[binary,pool]",
   "pymupdf",
-  "flash-attn",
-  "kagglehub[pandas-datasets]"
+  "kagglehub[pandas-datasets]",
 ]
 
 [[tool.uv.index]]
@@ -24,7 +23,6 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-rocm" }
 triton-rocm = { index = "pytorch-rocm" }
-flash-attn = { git = "https://github.com/ROCm/flash-attention/"}
 
 [build-system]
 requires = ["setuptools>=60"]
