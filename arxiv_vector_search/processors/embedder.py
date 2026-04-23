@@ -10,28 +10,6 @@ from arxiv_vector_search.documents import DocumentSplitIterator
 SentenceEmbedding: TypeAlias = np.ndarray[tuple[int], np.dtype[np.float16]]
 
 
-def get_sdpa_context():
-    """Return the best available SDPA backend context for this hardware."""
-    test = torch.randn(1, 1, 4, 64, dtype=torch.float16, device="cuda")
-    try:
-        # Test if FLASH_ATTENTION works on this ROCm build
-
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-            torch.nn.functional.scaled_dot_product_attention(test, test, test)
-        return sdpa_kernel(SDPBackend.FLASH_ATTENTION)
-    except RuntimeError:
-        pass
-    try:
-        with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
-            torch.nn.functional.scaled_dot_product_attention(test, test, test)
-        return sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION)
-    except RuntimeError:
-        return sdpa_kernel(SDPBackend.MATH)  # always works, slowest
-
-
-sdpa_ctx = get_sdpa_context()
-
-
 def get_params(model_name: str) -> Any:
     base = {
         "device": "cuda",
@@ -91,13 +69,11 @@ class Embedder:
             indices.append((doc_id, page_index, chunk_index))
             texts.append(text)
 
-        with sdpa_ctx:
-            embeddings = self.model.encode(
-                texts,
-                batch_size=self.batch_size,
-                show_progress_bar=True,
-                convert_to_numpy=True,
-            )
+        embeddings = self.model.encode(
+            texts,
+            batch_size=self.batch_size,
+            show_progress_bar=True,
+        )
         for indice, embedding in zip(indices, embeddings):
             doc_id, page_index, chunk_index = indice
             if doc_id not in doc_embeds:
