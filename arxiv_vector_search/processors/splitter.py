@@ -7,7 +7,7 @@ from arxiv_vector_search.documents import (
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter, TextSplitter
 
-from multiprocessing import Pool
+from multiprocessing import get_context
 
 DEFAULT_CHUNK_SIZE = 256
 DEFAULT_CHUNK_OVERLAP = int(DEFAULT_CHUNK_SIZE * 0.15)
@@ -100,7 +100,8 @@ class DocumentSplitter:
     def par_split_documents(
         self, documents: list[DownloadedDocument], num_workers: int
     ) -> Splits:
-        with Pool(processes=num_workers) as pool:
+        ctx = get_context("spawn")
+        with ctx.Pool(processes=num_workers) as pool:
             results = list(pool.imap(self.split_document, documents))
         split_obj = Splits()
         for result in results:

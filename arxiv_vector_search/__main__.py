@@ -8,6 +8,7 @@ import sys
 import os
 from argparse import ArgumentParser, BooleanOptionalAction
 from dataclasses import dataclass
+import torch
 import gc
 
 batch_sizes = {
@@ -119,6 +120,7 @@ if __name__ == "__main__":
         embedding_batch_size = next(
             model.batch_size for model in models if model.name == args.model
         )
+    torch.backends.cuda.preferred_rocm_fa_library("aotriton")
     embedder = Embedder(args.model, embedding_batch_size)
     if args.model not in model_names_in_db:
         db.add_model(embedder)
@@ -212,7 +214,9 @@ if __name__ == "__main__":
             )
             db.add_embeddings(embeddings, embedder)
             good_ids = set(embeddings.embeddings_dict.keys())
+            del embeddings
             good_batch = [doc for doc in batch if doc.identifier in good_ids]
+            del batch
             print(
                 f"Embeddings added to database. Updating states for {len(good_batch)} documents to EMBEDDED."
             )
@@ -222,7 +226,6 @@ if __name__ == "__main__":
                 EmbeddingState.EMBEDDED,
             )
             print("Batch processing complete. Moving on to next batch...")
-            del embeddings
             gc.collect()
 
     if args.query:

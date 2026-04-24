@@ -19,17 +19,14 @@ def get_params() -> Any:
     return base
 
 
-torch.backends.cuda.preferred_rocm_fa_library("aotriton")
-
-
 def create_model(model_name: str, **kwargs) -> SentenceTransformer:
     params = get_params()
     params.update(kwargs)
     model = SentenceTransformer(model_name, **params)
+    model.eval()
     model[0].auto_model = torch.compile(
         model[0].auto_model,
-        mode="max-autotune",
-        fullgraph=True,
+        mode="reduce-overhead",
     )
     return model
 
@@ -62,13 +59,16 @@ class Embedder:
             indices.append((doc_id, page_index, chunk_index))
             texts.append(text)
 
-        with sdpa_kernel(
-            [
-                SDPBackend.FLASH_ATTENTION,
-                SDPBackend.EFFICIENT_ATTENTION,
-                SDPBackend.MATH,
-            ],
-            set_priority=True,
+        with (
+            torch.inference_mode(),
+            sdpa_kernel(
+                [
+                    SDPBackend.FLASH_ATTENTION,
+                    SDPBackend.EFFICIENT_ATTENTION,
+                    SDPBackend.MATH,
+                ],
+                set_priority=True,
+            ),
         ):
             embeddings = (
                 self.model.encode(
@@ -77,11 +77,13 @@ class Embedder:
                     show_progress_bar=True,
                     convert_to_numpy=False,
                     convert_to_tensor=True,
+                    normalize_embeddings=True,
                 )
                 .half()
                 .cpu()
                 .numpy()
             )
+        torch.cuda.empty_cache()
         for indice, embedding in zip(indices, embeddings):
             doc_id, page_index, chunk_index = indice
             if doc_id not in doc_embeds:
