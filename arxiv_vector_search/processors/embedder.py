@@ -12,8 +12,7 @@ SentenceEmbedding: TypeAlias = np.ndarray[tuple[int], np.dtype[np.float16]]
 def get_params() -> Any:
     base = {
         "device": "cuda",
-        "model_kwargs": {"dtype": torch.float16, "attn_implementation": "sdpa"},
-        "config_kwargs": {"_attn_implementation": "sdpa"},
+        "model_kwargs": {"dtype": torch.float16},
     }
     return base
 

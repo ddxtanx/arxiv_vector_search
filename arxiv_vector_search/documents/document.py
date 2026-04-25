@@ -80,15 +80,24 @@ class SplitDocument(Document):
     splits: list[list[str]]  # indexed as [page][chunk]
     cur_page: int
     cur_chunk: int
+    min_len: int
 
     def __init__(
-        self, identifier: str, document_type: DocumentType, splits: list[list[str]]
+        self,
+        identifier: str,
+        document_type: DocumentType,
+        splits: list[list[str]],
+        min_len: int = -1,
     ):
         self.identifier = identifier
         self.document_type = document_type
         self.splits = splits
         self.cur_page = 0
         self.cur_chunk = 0
+        self.min_len = min_len
+
+    def set_min_len(self, min_len: int):
+        self.min_len = min_len
 
     def __iter__(self):
         self.cur_page = 0
@@ -104,6 +113,9 @@ class SplitDocument(Document):
             self.cur_chunk = 0
             return self.__next__()
         chunk_text = page_chunks[self.cur_chunk]
+        if self.min_len > 0 and len(chunk_text) < self.min_len:
+            self.cur_chunk += 1
+            return self.__next__()
         split_data = SplitData(
             identifier=self.identifier,
             page_index=self.cur_page,
@@ -112,52 +124,3 @@ class SplitDocument(Document):
         )
         self.cur_chunk += 1
         return split_data
-
-
-T = TypeVar("T")
-
-
-class DocumentSplitIterator(Generic[T]):
-    backing_obj: dict[
-        str, list[list[T]]
-    ]  # indexed as [document_id][page_index][chunk_index]
-    document_ids: list[str]
-    cur_doc_index: int
-    cur_page_index: int
-    cur_chunk_index: int
-
-    def __init__(self, backing_obj: dict[str, list[list[T]]]):
-        self.backing_obj = backing_obj
-        self.document_ids = list(backing_obj.keys())
-        self.cur_doc_index = 0
-        self.cur_page_index = 0
-        self.cur_chunk_index = 0
-
-    def __iter__(self):
-        self.cur_doc_index = 0
-        self.cur_page_index = 0
-        self.cur_chunk_index = 0
-        return self
-
-    def __next__(self) -> tuple[str, int, int, T]:
-        if self.cur_doc_index >= len(self.document_ids):
-            raise StopIteration
-        document_id = self.document_ids[self.cur_doc_index]
-        pages = self.backing_obj[document_id]
-        if self.cur_page_index >= len(pages):
-            self.cur_doc_index += 1
-            self.cur_page_index = 0
-            self.cur_chunk_index = 0
-            return self.__next__()
-        page_chunks = pages[self.cur_page_index]
-        if self.cur_chunk_index >= len(page_chunks):
-            self.cur_page_index += 1
-            self.cur_chunk_index = 0
-            return self.__next__()
-        chunk_data = page_chunks[self.cur_chunk_index]
-        if chunk_data is None:
-            raise ValueError(
-                f"Chunk data is None for document {document_id}, page {self.cur_page_index}, chunk {self.cur_chunk_index}"
-            )
-        self.cur_chunk_index += 1
-        return (document_id, self.cur_page_index, self.cur_chunk_index - 1, chunk_data)

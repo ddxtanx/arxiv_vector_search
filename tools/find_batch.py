@@ -16,19 +16,19 @@ import torch
 import logging
 import gc
 
-iters = 5
+iters = 3
 
 
 def time_encode(embedder, texts, batch_size):
     total_time = 0
-    try:
-        attempt_size = max(100, math.ceil(len(texts) / batch_size) * 2)
-        test_run = embedder.encode_text(
-            texts[:attempt_size], batch_size, show_progress=False
-        )
-        del test_run
-    except torch.OutOfMemoryError:
-        return float("inf")
+    # try:
+    #     attempt_size = max(100, math.ceil(len(texts) / batch_size) * 2)
+    #     test_run = embedder.encode_text(
+    #         texts[:attempt_size], batch_size, show_progress=False
+    #     )
+    #     del test_run
+    # except torch.OutOfMemoryError:
+    #     return float("inf")
     for _ in range(iters):
         random.shuffle(texts)
         start_time = time.time()
@@ -64,7 +64,7 @@ if __name__ == "__main__":
     docs = db.get_documents()
     random.shuffle(docs)
 
-    num_docs = 500
+    num_docs = 250
     docs = docs[:num_docs]
 
     ax_downloader = ArxivDownloader()

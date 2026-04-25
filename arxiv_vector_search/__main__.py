@@ -19,6 +19,8 @@ batch_sizes = {
     "ibm-granite/granite-embedding-small-english-r2": 64,
 }
 
+MIN_LEN = 128  # minimum character length for a chunk to be embedded. This is to filter out very short chunks that may not be useful for embedding and just waste space and compute.
+
 
 @dataclass
 class Args:
@@ -195,6 +197,7 @@ if __name__ == "__main__":
             split_errs = []
             for split_doc in split_docs:
                 if isinstance(split_doc, SplitDocument):
+                    split_doc.set_min_len(MIN_LEN)
                     good_splits.append(split_doc)
                 else:
                     split_errs.append(split_doc)

@@ -9,9 +9,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter, TextSplitte
 
 from multiprocessing import get_context
 
-DEFAULT_CHUNK_SIZE = 256
-DEFAULT_CHUNK_OVERLAP = int(DEFAULT_CHUNK_SIZE * 0.15)
-DEFAULT_CHUNK_FACTOR = 3
+DEFAULT_CHUNK_SIZE = 512
+DEFAULT_CHUNK_OVERLAP = int(DEFAULT_CHUNK_SIZE * 0.20)
+DEFAULT_CHUNK_FACTOR = 4
 
 
 class SplitError(Exception):
@@ -22,33 +22,6 @@ class SplitError(Exception):
         self.document_id = document_id
         self.message = message
         super().__init__(f"Error splitting document {document_id}: {message}")
-
-
-class Splits:
-    split_dict: dict[str, list[list[str]]]
-    errs: list[SplitError | ReadError]
-
-    def __init__(self):
-        self.split_dict = {}
-        self.errs = []
-
-    def add_split_doc(self, split_doc: SplitDocument):
-        self.split_dict[split_doc.identifier] = split_doc.splits
-
-    def add_error(self, error: SplitError | ReadError):
-        self.errs.append(error)
-
-    def __iter__(self):
-        return DocumentSplitIterator[str](self.split_dict)
-
-    def get_errors(self) -> list[SplitError | ReadError]:
-        return self.errs
-
-    def get_num_successful_splits(self) -> int:
-        return len(self.split_dict)
-
-    def get_num_errors(self) -> int:
-        return len(self.errs)
 
 
 class DocumentSplitter:
@@ -96,7 +69,7 @@ class DocumentSplitter:
     def par_split_documents(
         self, documents: list[DownloadedDocument], num_workers: int
     ) -> list[SplitDocument | ReadError | SplitError]:
-        ctx = get_context("forkserver")
+        ctx = get_context("spawn")
         with ctx.Pool(processes=num_workers) as pool:
             results = list(pool.imap(self.split_document, documents))
         return results
