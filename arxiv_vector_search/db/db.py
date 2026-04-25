@@ -8,7 +8,7 @@ from .tables import (
     Base,
     EmbeddingState,
 )
-from arxiv_vector_search.processors.embedder import Embedder, Embeddings
+from arxiv_vector_search.processors.embedder import Embedder, Embedding
 from arxiv_vector_search.documents import Document as PdfDocument, DocumentType
 from arxiv_vector_search.documents.arxiv import ArxivDocument
 from arxiv_vector_search.documents.doi import DOIDocument
@@ -36,6 +36,7 @@ class QueryResult:
 class Database:
     engine: Engine
     model_to_embedding_table: dict[str, type]
+    ident_to_doc_id_cache: dict[str, int]
 
     def __init__(self, database_url: str):
         self.engine = create_engine(
@@ -47,6 +48,9 @@ class Database:
         )
         self.model_to_embedding_table = {}
         Base.metadata.create_all(self.engine)
+        with Session(self.engine) as session:
+            docs = session.execute(select(Document)).scalars().all()
+            self.ident_to_doc_id_cache = {doc.identifier: doc.id for doc in docs}
 
     def add_model(self, embedder: Embedder):
         with Session(self.engine) as session:
@@ -61,24 +65,16 @@ class Database:
             )
             session.commit()
 
-    def get_identifier_to_doc_id(self, identifiers: set[str]) -> dict[str, int]:
-        with Session(self.engine) as session:
-            docs = (
-                session.execute(
-                    select(Document).where(Document.identifier.in_(identifiers))
-                )
-                .scalars()
-                .all()
-            )
-            return {doc.identifier: doc.id for doc in docs}
-
     def add_document(self, document: PdfDocument):
         with Session(self.engine) as session:
-            session.execute(
+            doc_id = session.execute(
                 insert(Document)
                 .values(identifier=document.identifier, pdf_type=document.document_type)
                 .on_conflict_do_nothing(index_elements=["identifier"])
-            )
+                .returning(Document.id)
+            ).scalar_one_or_none()
+            if doc_id is not None:
+                self.ident_to_doc_id_cache[document.identifier] = doc_id
             session.commit()
 
     def add_documents(self, documents: list[PdfDocument]):
@@ -87,10 +83,18 @@ class Database:
                 {"identifier": doc.identifier, "pdf_type": doc.document_type}
                 for doc in documents
             ]
-            session.execute(
-                insert(Document).on_conflict_do_nothing(index_elements=["identifier"]),
-                values,
+            docs = (
+                session.execute(
+                    insert(Document)
+                    .on_conflict_do_nothing(index_elements=["identifier"])
+                    .returning(Document.identifier, Document.id),
+                    values,
+                )
+                .scalars()
+                .all()
             )
+            for identifier, doc_id in docs:
+                self.ident_to_doc_id_cache[identifier] = doc_id
             session.commit()
 
     def add_embedding_metadata(
@@ -109,6 +113,19 @@ class Database:
             session.add(embedding_metadata)
             session.commit()
         return embedding_metadata
+
+    def get_documents(self) -> list[PdfDocument]:
+        with Session(self.engine) as session:
+            docs = session.execute(select(Document)).scalars().all()
+            pdf_docs = []
+            for doc in docs:
+                if doc.pdf_type == DocumentType.ARXIV:
+                    pdf_docs.append(ArxivDocument(doc.identifier))
+                elif doc.pdf_type == DocumentType.URL:
+                    pdf_docs.append(URLDocument(doc.identifier))
+                elif doc.pdf_type == DocumentType.DOI:
+                    pdf_docs.append(DOIDocument(doc.identifier))
+            return pdf_docs
 
     def create_embedding_table_for_model(self, embedder: Embedder):
         table = create_embedding_table(
@@ -159,39 +176,52 @@ class Database:
                     missing_docs.append(DOIDocument(doc.identifier))
             return missing_docs
 
-    def add_embeddings(self, embeddings: Embeddings, embedder: Embedder):
+    def add_embeddings(self, embeddings: list[Embedding], embedder: Embedder):
         if embedder.get_model_name() not in self.model_to_embedding_table:
             self.create_embedding_table_for_model(embedder)
         EmbeddingType = self.model_to_embedding_table.get(embedder.get_model_name())
-        document_identifiers = set(embeddings.embeddings_dict.keys())
-        identifier_to_doc_id = self.get_identifier_to_doc_id(document_identifiers)
+        for embedding in embeddings:
+            if embedding["document_id"] not in self.ident_to_doc_id_cache:
+                raise ValueError(
+                    f"Document identifier {embedding['document_id']} not found in database"
+                )
+            embedding["document_id"] = self.ident_to_doc_id_cache[
+                embedding["document_id"]
+            ]
         with Session(self.engine) as session:
             session.execute(
                 insert(EmbeddingType),
-                [
-                    {
-                        "document_id": identifier_to_doc_id[doc_id],
-                        "page_number": page_index,
-                        "chunk_number": chunk_index,
-                        "embedding": embedding,
-                    }
-                    for (doc_id, page_index, chunk_index, embedding) in embeddings
-                ],
+                embeddings,
+            )
+            session.commit()
+
+    def update_embedding_metadata_states_by_idents(
+        self, embedder: Embedder, doc_idents: list[str], state: EmbeddingState
+    ):
+        with Session(self.engine) as session:
+            model_record = session.execute(
+                select(Model).where(Model.name == embedder.get_model_name())
+            ).scalar_one()
+            model_id = model_record.id
+            doc_ids = set(self.ident_to_doc_id_cache.get(ident) for ident in doc_idents)
+            session.execute(
+                update(EmbeddingMetadata)
+                .where(EmbeddingMetadata.model_id == model_id)
+                .where(EmbeddingMetadata.document_id.in_(doc_ids))
+                .values(state=state)
             )
             session.commit()
 
     def update_embedding_metadata_states(
         self, embedder: Embedder, documents: list[PdfDocument], state: EmbeddingState
     ):
-        doc_identifiers = set([doc.identifier for doc in documents])
-        identifier_to_doc_id = self.get_identifier_to_doc_id(doc_identifiers)
         with Session(self.engine) as session:
             model_record = session.execute(
                 select(Model).where(Model.name == embedder.get_model_name())
             ).scalar_one()
             model_id = model_record.id
             doc_ids = set(
-                identifier_to_doc_id.get(identifier) for identifier in doc_identifiers
+                self.ident_to_doc_id_cache.get(doc.identifier) for doc in documents
             )
             session.execute(
                 update(EmbeddingMetadata)
@@ -202,9 +232,7 @@ class Database:
             session.commit()
 
     def delete_embeddings_for_document(self, document: PdfDocument):
-        doc_id = self.get_identifier_to_doc_id(set([document.identifier])).get(
-            document.identifier
-        )
+        doc_id = self.ident_to_doc_id_cache.get(document.identifier)
         with Session(self.engine) as session:
             session.execute(
                 delete(EmbeddingMetadata).where(EmbeddingMetadata.document_id == doc_id)

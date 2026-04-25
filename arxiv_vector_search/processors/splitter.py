@@ -15,13 +15,13 @@ DEFAULT_CHUNK_FACTOR = 3
 
 
 class SplitError(Exception):
-    document: Document
+    document_id: str
     message: str
 
-    def __init__(self, document: Document, message: str):
-        self.document = document
+    def __init__(self, document_id: str, message: str):
+        self.document_id = document_id
         self.message = message
-        super().__init__(f"Error splitting document {document.identifier}: {message}")
+        super().__init__(f"Error splitting document {document_id}: {message}")
 
 
 class Splits:
@@ -70,7 +70,7 @@ class DocumentSplitter:
     ) -> SplitDocument | ReadError | SplitError:
         pages_text = document.get_pages_text()
         if isinstance(pages_text, ReadError):
-            raise pages_text
+            return pages_text
         try:
             splits = [self.splitter.split_text(page) for page in pages_text]
             return SplitDocument(
@@ -79,9 +79,11 @@ class DocumentSplitter:
                 splits,
             )
         except Exception as e:
-            raise SplitError(document=document, message=str(e))
+            return SplitError(document.identifier, str(e))
 
-    def split_documents(self, documents: list[DownloadedDocument]) -> Splits:
+    def split_documents(
+        self, documents: list[DownloadedDocument]
+    ) -> list[SplitDocument | ReadError | SplitError]:
         results: list[SplitDocument | ReadError | SplitError] = []
         for document in documents:
             try:
@@ -89,24 +91,12 @@ class DocumentSplitter:
                 results.append(split_doc)
             except SplitError | ReadError as e:
                 results.append(e)
-        split_obj = Splits()
-        for result in results:
-            if isinstance(result, SplitDocument):
-                split_obj.add_split_doc(result)
-            else:
-                split_obj.add_error(result)
-        return split_obj
+        return results
 
     def par_split_documents(
         self, documents: list[DownloadedDocument], num_workers: int
-    ) -> Splits:
-        ctx = get_context("spawn")
+    ) -> list[SplitDocument | ReadError | SplitError]:
+        ctx = get_context("forkserver")
         with ctx.Pool(processes=num_workers) as pool:
             results = list(pool.imap(self.split_document, documents))
-        split_obj = Splits()
-        for result in results:
-            if isinstance(result, SplitDocument):
-                split_obj.add_split_doc(result)
-            else:
-                split_obj.add_error(result)
-        return split_obj
+        return results

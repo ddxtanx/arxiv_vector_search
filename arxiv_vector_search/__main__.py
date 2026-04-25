@@ -1,3 +1,4 @@
+from arxiv_vector_search.documents.document import SplitDocument
 from arxiv_vector_search.db.tables import EmbeddingState
 from arxiv_vector_search.documents.document import DownloadedDocument, DocumentType
 from arxiv_vector_search.documents.arxiv import ArxivDownloader
@@ -8,7 +9,6 @@ import sys
 import os
 from argparse import ArgumentParser, BooleanOptionalAction
 from dataclasses import dataclass
-import torch
 import gc
 
 batch_sizes = {
@@ -120,7 +120,6 @@ if __name__ == "__main__":
         embedding_batch_size = next(
             model.batch_size for model in models if model.name == args.model
         )
-    torch.backends.cuda.preferred_rocm_fa_library("aotriton")
     embedder = Embedder(args.model, embedding_batch_size)
     if args.model not in model_names_in_db:
         db.add_model(embedder)
@@ -190,30 +189,38 @@ if __name__ == "__main__":
                 doc for doc in downloaded if isinstance(doc, DownloadedDocument)
             ]
             split_docs = splitter.par_split_documents(downloaded, args.threads)
-            num_successful_splits = split_docs.get_num_successful_splits()
             downloader.clear_downloaders()
             del downloaded
-            split_errs = split_docs.get_errors()
+            good_splits: list[SplitDocument] = []
+            split_errs = []
+            for split_doc in split_docs:
+                if isinstance(split_doc, SplitDocument):
+                    good_splits.append(split_doc)
+                else:
+                    split_errs.append(split_doc)
+            num_successful_splits = len(good_splits)
             print(
                 f"Split documents into {num_successful_splits} chunks. Encountered {len(split_errs)} split errors. Updating states in database..."
             )
             if split_errs:
-                db.update_embedding_metadata_states(
+                db.update_embedding_metadata_states_by_idents(
                     embedder,
-                    [err.document for err in split_errs],
+                    [err.document_id for err in split_errs],
                     EmbeddingState.SPLIT_ERROR,
                 )
 
             print(
                 f"Generating embeddings for {num_successful_splits} document chunks. This may take a while..."
             )
-            embeddings = embedder.embed_documents(split_docs)
+            embeddings = embedder.embed_documents(good_splits)
+            good_ids = set(split.identifier for split in good_splits)
             del split_docs
+            del good_splits
+            del split_errs
             print(
                 f"Generated embeddings for {num_successful_splits} document chunks. Adding to database..."
             )
             db.add_embeddings(embeddings, embedder)
-            good_ids = set(embeddings.embeddings_dict.keys())
             del embeddings
             good_batch = [doc for doc in batch if doc.identifier in good_ids]
             del batch
@@ -229,7 +236,9 @@ if __name__ == "__main__":
             gc.collect()
 
     if args.query:
-        query_embedding = embedder.model.encode(args.query).numpy()
+        query_embedding = embedder.model.encode(
+            args.query, convert_to_numpy=True, normalize_embeddings=True
+        )
         print("Query embedding generated. Performing vector search...")
         results = db.query_embeddings(embedder, query_embedding, top_k=1000)
         print(

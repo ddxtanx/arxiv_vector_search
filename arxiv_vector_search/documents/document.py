@@ -1,3 +1,7 @@
+from pymupdf import TEXTFLAGS_TEXT
+from pymupdf import TEXT_COLLECT_VECTORS
+from pymupdf import TEXT_PRESERVE_IMAGES
+from pymupdf import TEXT_PRESERVE_LIGATURES
 from pathlib import Path
 from typing import TypeVar, Generic
 import enum
@@ -27,13 +31,16 @@ class Document:
 
 
 class ReadError(Exception):
-    document: Document
+    document_id: str
     message: str
 
-    def __init__(self, document: Document, message: str):
-        self.document = document
+    def __init__(self, document_id: str, message: str):
+        self.document_id = document_id
         self.message = message
-        super().__init__(f"Error reading document {document.identifier}: {message}")
+        super().__init__(f"Error reading document {document_id}: {message}")
+
+    def __reduce__(self):
+        return (ReadError, (self.document_id, self.message))
 
 
 class DownloadedDocument(Document):
@@ -47,9 +54,9 @@ class DownloadedDocument(Document):
     def get_pages_text(self) -> list[str] | ReadError:
         try:
             with pymupdf.open(self.path) as doc:
-                return [page.get_text() for page in doc]
+                return [str(page.get_text()) for page in doc]
         except Exception as e:
-            return ReadError(document=self, message=str(e))
+            return ReadError(self.identifier, str(e))
 
     @staticmethod
     def from_document(document: Document, path: Path) -> "DownloadedDocument":

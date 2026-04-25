@@ -2,7 +2,7 @@ import enum
 from typing import List
 
 from pgvector.sqlalchemy import HALFVEC
-from sqlalchemy import String, ForeignKey, SmallInteger, BigInteger, Index
+from sqlalchemy import String, ForeignKey, SmallInteger, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from arxiv_vector_search.documents.document import DocumentType
 

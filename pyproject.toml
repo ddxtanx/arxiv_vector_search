@@ -12,7 +12,7 @@ dependencies = [
   "pgvector",
   "psycopg[binary,pool]",
   "pymupdf",
-  "flash-attn",
+  "flash-attn==2.8.4",
   "kagglehub[pandas-datasets]",
   "ninja",
   "packaging",

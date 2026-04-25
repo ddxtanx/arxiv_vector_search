@@ -1,11 +1,10 @@
+from arxiv_vector_search.documents.document import SplitDocument
 from typing import TypeAlias
 import numpy as np
-from typing import Any
+from typing import Any, TypedDict
 import torch
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from sentence_transformers import SentenceTransformer
-from arxiv_vector_search.processors.splitter import Splits
-from arxiv_vector_search.documents import DocumentSplitIterator
 
 SentenceEmbedding: TypeAlias = np.ndarray[tuple[int], np.dtype[np.float16]]
 
@@ -31,14 +30,11 @@ def create_model(model_name: str, **kwargs) -> SentenceTransformer:
     return model
 
 
-class Embeddings:
-    embeddings_dict: dict[str, list[list[SentenceEmbedding]]]
-
-    def __init__(self, embeddings_dict: dict[str, list[list[SentenceEmbedding]]]):
-        self.embeddings_dict = embeddings_dict
-
-    def __iter__(self):
-        return DocumentSplitIterator[SentenceEmbedding](self.embeddings_dict)
+class Embedding(TypedDict):
+    document_id: str | int
+    page_number: int
+    chunk_number: int
+    embedding: SentenceEmbedding
 
 
 class Embedder:
@@ -47,18 +43,14 @@ class Embedder:
     batch_size: int
 
     def __init__(self, model_name: str, batch_size: int = 32, **kwargs):
+        torch.backends.cuda.preferred_rocm_fa_library("aotriton")
         self.model_name = model_name
         self.model = create_model(model_name, **kwargs)
         self.batch_size = batch_size
 
-    def embed_documents(self, splits: Splits) -> Embeddings:
-        doc_embeds: dict[str, list[list[SentenceEmbedding | None]]] = {}
-        indices: list[tuple[str, int, int]] = []
-        texts: list[str] = []
-        for doc_id, page_index, chunk_index, text in splits:
-            indices.append((doc_id, page_index, chunk_index))
-            texts.append(text)
-
+    def encode_text(
+        self, texts: list[str], batch_size: int, show_progress: bool = False
+    ) -> list[SentenceEmbedding]:
         with (
             torch.inference_mode(),
             sdpa_kernel(
@@ -73,28 +65,34 @@ class Embedder:
             embeddings = (
                 self.model.encode(
                     texts,
-                    batch_size=self.batch_size,
-                    show_progress_bar=True,
+                    batch_size=batch_size,
                     convert_to_numpy=False,
                     convert_to_tensor=True,
                     normalize_embeddings=True,
+                    show_progress_bar=show_progress,
                 )
                 .half()
                 .cpu()
                 .numpy()
             )
         torch.cuda.empty_cache()
-        for indice, embedding in zip(indices, embeddings):
-            doc_id, page_index, chunk_index = indice
-            if doc_id not in doc_embeds:
-                doc_embeds[doc_id] = []
-            while len(doc_embeds[doc_id]) <= page_index:
-                doc_embeds[doc_id].append([])
-            while len(doc_embeds[doc_id][page_index]) <= chunk_index:
-                doc_embeds[doc_id][page_index].append(None)
-            doc_embeds[doc_id][page_index][chunk_index] = embedding
+        return embeddings
 
-        return Embeddings(doc_embeds)
+    def embed_documents(self, split_docs: list[SplitDocument]) -> list[Embedding]:
+        splits = [split for doc in split_docs for split in doc]
+        del split_docs
+        texts = [split.text for split in splits]
+
+        embeddings = self.encode_text(texts, self.batch_size)
+        return [
+            {
+                "document_id": split.identifier,
+                "page_number": split.page_index,
+                "chunk_number": split.chunk_index,
+                "embedding": embedding,
+            }
+            for split, embedding in zip(splits, embeddings)
+        ]
 
     def get_model_name(self) -> str:
         return self.model_name
