@@ -1,7 +1,7 @@
 [project]
 name = "arxiv_vector_search"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
   "sentence-transformers",
   "torch",
@@ -12,6 +12,7 @@ dependencies = [
   "pgvector",
   "psycopg[binary,pool]",
   "pymupdf",
+  "pymupdf4llm",
   "flash-attn==2.8.4",
   "kagglehub[pandas-datasets]",
   "ninja",
@@ -26,15 +27,18 @@ explicit = true
 [tool.uv]
 no-build-isolation-package = ["flash-attn"]
 
+[tool.uv.extra-build-dependencies]
+flash-attn = ["setuptools", "psutil"]
+
 [tool.uv.sources]
 torch = { index = "pytorch-rocm" }
 triton-rocm = { index = "pytorch-rocm" }
 flash-attn = { git = "https://github.com/Dao-AILab/flash-attention/", branch = "main" }
 
 [build-system]
-requires = ["setuptools>=60"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.11.7,<0.12"]
+build-backend = "uv_build"
 
-[tool.setuptools.packages.find]
-where = ["./"]
-include = ["arxiv_vector_search*"]
+[tool.uv.build-backend]
+module-name = "arxiv_vector_search"
+module-root = ""

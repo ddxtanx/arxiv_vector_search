@@ -1,11 +1,8 @@
-from pymupdf import TEXTFLAGS_TEXT
-from pymupdf import TEXT_COLLECT_VECTORS
-from pymupdf import TEXT_PRESERVE_IMAGES
-from pymupdf import TEXT_PRESERVE_LIGATURES
 from pathlib import Path
-from typing import TypeVar, Generic
 import enum
 import pymupdf
+import pymupdf4llm
+import re
 
 pymupdf.TOOLS.mupdf_display_errors(False)
 
@@ -14,6 +11,11 @@ class DocumentType(enum.Enum):
     ARXIV = "arxiv"
     DOI = "doi"
     URL = "url"
+
+
+omit_regex = re.compile(
+    r"\*\*==> [a-zA-Z]+ \[[0-9]+ x [0-9]+\] intentionally omitted <==\*\*\n\n"
+)
 
 
 class Document:
@@ -58,69 +60,26 @@ class DownloadedDocument(Document):
         except Exception as e:
             return ReadError(self.identifier, str(e))
 
+    def get_text(self) -> str | ReadError:
+        try:
+            with pymupdf.open(self.path) as doc:
+                page_chunk_list = pymupdf4llm.to_markdown(
+                    doc,
+                    extract_words=False,
+                    footer=False,
+                    header=False,
+                    ignore_graphics=True,
+                    ignore_images=True,
+                    page_chunks=True,
+                    show_progress=False,
+                    use_ocr=False,
+                )
+        except Exception as e:
+            return ReadError(self.identifier, str(e))
+        all_text = "\n\n".join(page["text"] for page in page_chunk_list)
+        all_text = omit_regex.sub("", all_text)
+        return all_text
+
     @staticmethod
     def from_document(document: Document, path: Path) -> "DownloadedDocument":
         return DownloadedDocument(document.identifier, document.document_type, path)
-
-
-class SplitData:
-    identifier: str
-    page_index: int
-    chunk_index: int
-    text: str
-
-    def __init__(self, identifier: str, page_index: int, chunk_index: int, text: str):
-        self.identifier = identifier
-        self.page_index = page_index
-        self.chunk_index = chunk_index
-        self.text = text
-
-
-class SplitDocument(Document):
-    splits: list[list[str]]  # indexed as [page][chunk]
-    cur_page: int
-    cur_chunk: int
-    min_len: int
-
-    def __init__(
-        self,
-        identifier: str,
-        document_type: DocumentType,
-        splits: list[list[str]],
-        min_len: int = -1,
-    ):
-        self.identifier = identifier
-        self.document_type = document_type
-        self.splits = splits
-        self.cur_page = 0
-        self.cur_chunk = 0
-        self.min_len = min_len
-
-    def set_min_len(self, min_len: int):
-        self.min_len = min_len
-
-    def __iter__(self):
-        self.cur_page = 0
-        self.cur_chunk = 0
-        return self
-
-    def __next__(self) -> SplitData:
-        if self.cur_page >= len(self.splits):
-            raise StopIteration
-        page_chunks = self.splits[self.cur_page]
-        if self.cur_chunk >= len(page_chunks):
-            self.cur_page += 1
-            self.cur_chunk = 0
-            return self.__next__()
-        chunk_text = page_chunks[self.cur_chunk]
-        if self.min_len > 0 and len(chunk_text) < self.min_len:
-            self.cur_chunk += 1
-            return self.__next__()
-        split_data = SplitData(
-            identifier=self.identifier,
-            page_index=self.cur_page,
-            chunk_index=self.cur_chunk,
-            text=chunk_text,
-        )
-        self.cur_chunk += 1
-        return split_data

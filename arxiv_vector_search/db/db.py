@@ -1,3 +1,4 @@
+from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 import numpy as np
 from .tables import (
@@ -21,12 +22,12 @@ from sqlalchemy.pool import QueuePool
 
 class QueryResult:
     document: PdfDocument
-    page_number: int
+    section: str
     distance: float
 
-    def __init__(self, document: PdfDocument, page_number: int, distance: float):
+    def __init__(self, document: PdfDocument, section: str, distance: float):
         self.document = document
-        self.page_number = page_number
+        self.section = section
         self.distance = distance
 
     def get_url(self) -> str:
@@ -83,18 +84,14 @@ class Database:
                 {"identifier": doc.identifier, "pdf_type": doc.document_type}
                 for doc in documents
             ]
-            docs = (
-                session.execute(
-                    insert(Document)
-                    .on_conflict_do_nothing(index_elements=["identifier"])
-                    .returning(Document.identifier, Document.id),
-                    values,
-                )
-                .scalars()
-                .all()
-            )
+            docs = session.execute(
+                insert(Document)
+                .on_conflict_do_nothing(index_elements=["identifier"])
+                .returning(Document.identifier, Document.id),
+                values,
+            ).all()
             for identifier, doc_id in docs:
-                self.ident_to_doc_id_cache[identifier] = doc_id
+                self.ident_to_doc_id_cache[identifier] = int(doc_id)
             session.commit()
 
     def add_embedding_metadata(
@@ -281,15 +278,21 @@ class Database:
             ).scalar_one()
             model_id = model_record.id
             # get documents that have no embedding metadata entries with document and model ids corresponding to given
-            missing_docs = session.execute(
-                select(Document).where(
-                    ~Document.id.in_(
-                        select(EmbeddingMetadata.document_id).where(
-                            EmbeddingMetadata.model_id == model_id
+            missing_docs = (
+                session.execute(
+                    select(Document).where(
+                        select(func.count(EmbeddingMetadata.id))
+                        .where(
+                            EmbeddingMetadata.document_id == Document.id,
+                            EmbeddingMetadata.model_id == model_id,
                         )
+                        .scalar_subquery()
+                        == 0
                     )
                 )
-            ).scalars()
+                .scalars()
+                .all()
+            )
             new_embedding_metadata = [
                 {
                     "document_id": doc.id,
@@ -298,7 +301,8 @@ class Database:
                 }
                 for doc in missing_docs
             ]
-            session.execute(insert(EmbeddingMetadata), new_embedding_metadata)
+            if new_embedding_metadata:
+                session.execute(insert(EmbeddingMetadata), new_embedding_metadata)
             session.commit()
 
     def query_embeddings(
@@ -334,7 +338,7 @@ class Database:
                 query_results.append(
                     QueryResult(
                         document=document,
-                        page_number=embedding.page_number,
+                        section=embedding.section,
                         distance=distance,
                     )
                 )

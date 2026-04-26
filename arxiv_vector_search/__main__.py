@@ -1,4 +1,4 @@
-from arxiv_vector_search.documents.document import SplitDocument
+from arxiv_vector_search.processors.splitter import SplitData
 from arxiv_vector_search.db.tables import EmbeddingState
 from arxiv_vector_search.documents.document import DownloadedDocument, DocumentType
 from arxiv_vector_search.documents.arxiv import ArxivDownloader
@@ -193,11 +193,10 @@ if __name__ == "__main__":
             split_docs = splitter.par_split_documents(downloaded, args.threads)
             downloader.clear_downloaders()
             del downloaded
-            good_splits: list[SplitDocument] = []
+            good_splits: list[SplitData] = []
             split_errs = []
             for split_doc in split_docs:
-                if isinstance(split_doc, SplitDocument):
-                    split_doc.set_min_len(MIN_LEN)
+                if isinstance(split_doc, SplitData):
                     good_splits.append(split_doc)
                 else:
                     split_errs.append(split_doc)

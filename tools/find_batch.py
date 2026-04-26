@@ -16,21 +16,26 @@ import torch
 import logging
 import gc
 
+TIME_TOL = 0.1
 iters = 3
 
 
-def time_encode(embedder, texts, batch_size):
+def time_encode(model_name, texts, batch_size):
+    print(f"Testing batch size {batch_size}")
+    embedder = Embedder(model_name, batch_size)
     total_time = 0
-    # try:
-    #     attempt_size = max(100, math.ceil(len(texts) / batch_size) * 2)
-    #     test_run = embedder.encode_text(
-    #         texts[:attempt_size], batch_size, show_progress=False
-    #     )
-    #     del test_run
-    # except torch.OutOfMemoryError:
-    #     return float("inf")
+    try:
+        print("Warming up...")
+        for _ in range(iters):
+            attempt_size = 10 * batch_size
+            test_run = embedder.encode_text(
+                texts[:attempt_size], batch_size, show_progress=True
+            )
+            del test_run
+    except torch.OutOfMemoryError:
+        return float("inf")
+    print("Running timed tests...")
     for _ in range(iters):
-        random.shuffle(texts)
         start_time = time.time()
         try:
             encodings = embedder.encode_text(texts, batch_size, show_progress=True)
@@ -60,11 +65,10 @@ if __name__ == "__main__":
     except ValueError:
         print("Not a number, interpreting it as a model name")
 
-    embedder = Embedder(model, 32)
     docs = db.get_documents()
     random.shuffle(docs)
 
-    num_docs = 250
+    num_docs = 350
     docs = docs[:num_docs]
 
     ax_downloader = ArxivDownloader()
@@ -96,10 +100,10 @@ if __name__ == "__main__":
 
     times = {}
 
-    start = 1
+    start = 8
 
     while start < len(texts):
-        time_taken = time_encode(embedder, texts, start)
+        time_taken = time_encode(model, texts, start)
         gc.collect()
         if time_taken == float("inf"):
             break
@@ -111,4 +115,25 @@ if __name__ == "__main__":
             best_time = batch_time
             best_batch_size = batch_size
 
-    print(best_batch_size)
+    start = best_batch_size // 2
+    end = best_batch_size * 2
+
+    while end - start > 2:
+        mid = (start + end) // 2
+        print(f"start: {start}, mid: {mid}, end: {end}")
+        end_time = time_encode(model, texts, end)
+        if end_time == float("inf"):
+            end -= 1
+            continue
+        mid_time = time_encode(model, texts, mid)
+        if abs(mid_time - end_time) < TIME_TOL:
+            start_time = time_encode(model, texts, start)
+            if abs(start_time - mid_time) < TIME_TOL:
+                start = mid
+                break
+            else:
+                end = mid
+        else:
+            start = mid
+    best_batch_size = start
+    print(f"For model {model}, best batch size is {best_batch_size}")

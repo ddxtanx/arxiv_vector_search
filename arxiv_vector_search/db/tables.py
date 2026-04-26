@@ -1,3 +1,5 @@
+from sqlalchemy import VARCHAR
+from sqlalchemy import Text
 import enum
 from typing import List
 
@@ -59,7 +61,7 @@ def create_embedding_table(model_name: str, embedding_dim):
             ForeignKey("documents.id"), primary_key=True, index=True
         ),
         "document": relationship("Document"),
-        "page_number": mapped_column(SmallInteger, nullable=False, primary_key=True),
+        "section": mapped_column(VARCHAR(128), nullable=False, primary_key=True),
         "chunk_number": mapped_column(SmallInteger, nullable=False, primary_key=True),
         "embedding": mapped_column(HALFVEC(embedding_dim), nullable=False),
     }
