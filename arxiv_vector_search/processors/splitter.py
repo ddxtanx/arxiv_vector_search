@@ -1,3 +1,5 @@
+from transformers import PreTrainedTokenizerBase
+from arxiv_vector_search.documents.document import PagedDocument
 import traceback
 from arxiv_vector_search.documents import (
     DownloadedDocument,
@@ -7,15 +9,16 @@ from langchain_text_splitters import (
     RecursiveCharacterTextSplitter,
     MarkdownHeaderTextSplitter,
 )
-
 from multiprocessing import get_context
+from pathos.multiprocessing import ProcessingPool as Pool
+import traceback
 
 DEFAULT_CHUNK_SIZE = 512
-DEFAULT_CHUNK_OVERLAP = int(DEFAULT_CHUNK_SIZE * 0.15)
-DEFAULT_CHUNK_FACTOR = 4
+DEFAULT_CHUNK_OVERLAP = 0.15
+DEFAULT_CHUNK_FACTOR = 3.5
 
 
-class SplitError(Exception):
+class SplitError(BaseException):
     document_id: str
     message: str
 
@@ -27,13 +30,19 @@ class SplitError(Exception):
 
 class SplitData:
     identifier: str
-    section: str
+    page_index: int
     chunk_index: int
     text: str
 
-    def __init__(self, identifier: str, section: str, chunk_index: int, text: str):
+    def __init__(
+        self,
+        identifier: str,
+        page_index: int,
+        chunk_index: int,
+        text: str,
+    ):
         self.identifier = identifier
-        self.section = section
+        self.page_index = page_index
         self.chunk_index = chunk_index
         self.text = text
 
@@ -41,29 +50,23 @@ class SplitData:
 class DocumentSplitter:
     chunk_size: int
     chunk_overlap: int
-    md_splitter: MarkdownHeaderTextSplitter
     recursive_splitter: RecursiveCharacterTextSplitter
 
     def __init__(
         self,
-        chunk_size=DEFAULT_CHUNK_SIZE,
-        chunk_overlap=DEFAULT_CHUNK_OVERLAP,
-        chunk_factor=DEFAULT_CHUNK_FACTOR,
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
+        chunk_factor: float = DEFAULT_CHUNK_FACTOR,
+        tokenizer: PreTrainedTokenizerBase | None = None,
     ):
-        self.chunk_size = chunk_size * chunk_factor
-        self.chunk_overlap = chunk_overlap * chunk_factor
-        self.md_splitter = MarkdownHeaderTextSplitter(
-            headers_to_split_on=[
-                ("#", "Section"),
-                ("##", "Subsection"),
-                ("###", "Subsubsection"),
-                ("####", "Paragraph"),
-            ]
-        )
-        self.recursive_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            separators=[
+        if not chunk_size:
+            chunk_size = DEFAULT_CHUNK_SIZE
+        if not chunk_overlap:
+            chunk_overlap = int(chunk_size * DEFAULT_CHUNK_OVERLAP)
+        kwargs = {
+            "chunk_size": chunk_size,
+            "chunk_overlap": chunk_overlap,
+            "separators": [
                 "\n\n\n",
                 "\n\n",
                 ". \n",
@@ -76,42 +79,46 @@ class DocumentSplitter:
                 " ",
                 "",
             ],
-        )
+            "add_start_index": True,
+        }
+        if tokenizer is not None:
+            self.recursive_splitter = (
+                RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
+                    tokenizer,
+                    **kwargs,
+                )
+            )
+        else:
+            self.chunk_size = int(chunk_size * chunk_factor)
+            self.chunk_overlap = int(chunk_overlap * chunk_factor)
+            kwargs["chunk_size"] = self.chunk_size
+            kwargs["chunk_overlap"] = self.chunk_overlap
+            self.recursive_splitter = RecursiveCharacterTextSplitter(
+                **kwargs,
+            )
 
     def split_document(
         self, document: DownloadedDocument
     ) -> list[SplitData] | ReadError | SplitError:
-        doc_text = document.get_text()
-        if isinstance(doc_text, ReadError):
-            return doc_text
+        paged_doc = PagedDocument.from_downloaded_document(document)
+        if not isinstance(paged_doc, PagedDocument):
+            return paged_doc
+        document_text = paged_doc.get_text()
+        if not document_text.strip():
+            return SplitError(document.identifier, "Document text is empty")
         try:
-            split_datum = []
-            md_splits = self.md_splitter.split_text(doc_text)
-            for section in md_splits:
-                section_titles = list(section.metadata.values())
-                deepest_section = section_titles[-1] if section_titles else ""
-                content = section.page_content
-                if len(content) < self.chunk_size:
-                    split_datum.append(
-                        SplitData(
-                            identifier=document.identifier,
-                            section=deepest_section,
-                            chunk_index=0,
-                            text=content,
-                        )
-                    )
-                else:
-                    splits = self.recursive_splitter.split_text(content)
-                    for i, split in enumerate(splits):
-                        split_datum.append(
-                            SplitData(
-                                identifier=document.identifier,
-                                section=deepest_section,
-                                chunk_index=i,
-                                text=split,
-                            )
-                        )
-            return split_datum
+            chunks = self.recursive_splitter.create_documents([document_text])
+            return [
+                SplitData(
+                    identifier=paged_doc.identifier,
+                    page_index=paged_doc.start_index_to_page_index(
+                        doc.metadata["start_index"]
+                    ),
+                    chunk_index=i,
+                    text=doc.page_content,
+                )
+                for i, doc in enumerate(chunks)
+            ]
         except Exception as e:
             print(
                 f"Error splitting document {document.identifier}: {traceback.format_exc()}"
@@ -136,9 +143,13 @@ class DocumentSplitter:
     def par_split_documents(
         self, documents: list[DownloadedDocument], num_workers: int
     ) -> list[SplitData | ReadError | SplitError]:
-        ctx = get_context("forkserver")
-        with ctx.Pool(processes=num_workers) as pool:
-            results = list(pool.imap(self.split_document, documents))
+        if num_workers <= 1:
+            return self.split_documents(documents)
+        chunk_size = max(1, len(documents) // num_workers)
+        with Pool(nodes=num_workers) as pool:
+            results = list(
+                pool.imap(self.split_document, documents, chunksize=chunk_size)
+            )
         results_unpacked: list[SplitData | ReadError | SplitError] = []
         for result in results:
             if isinstance(result, list):

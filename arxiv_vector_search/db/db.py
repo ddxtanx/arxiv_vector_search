@@ -22,12 +22,12 @@ from sqlalchemy.pool import QueuePool
 
 class QueryResult:
     document: PdfDocument
-    section: str
+    page_index: int
     distance: float
 
-    def __init__(self, document: PdfDocument, section: str, distance: float):
+    def __init__(self, document: PdfDocument, page_index: int, distance: float):
         self.document = document
-        self.section = section
+        self.page_index = page_index
         self.distance = distance
 
     def get_url(self) -> str:
@@ -232,7 +232,9 @@ class Database:
         doc_id = self.ident_to_doc_id_cache.get(document.identifier)
         with Session(self.engine) as session:
             session.execute(
-                delete(EmbeddingMetadata).where(EmbeddingMetadata.document_id == doc_id)
+                update(EmbeddingMetadata)
+                .where(EmbeddingMetadata.document_id == doc_id)
+                .values(state=EmbeddingState.MISSING)
             )
             for table in self.model_to_embedding_table.values():
                 session.execute(delete(table).where(table.document_id == doc_id))
@@ -245,7 +247,9 @@ class Database:
             ).scalar_one()
             model_id = model_record.id
             session.execute(
-                delete(EmbeddingMetadata).where(EmbeddingMetadata.model_id == model_id)
+                update(EmbeddingMetadata)
+                .where(EmbeddingMetadata.model_id == model_id)
+                .values(state=EmbeddingState.MISSING)
             )
             embedding_table = self.model_to_embedding_table.get(
                 embedder.get_model_name()
@@ -338,7 +342,7 @@ class Database:
                 query_results.append(
                     QueryResult(
                         document=document,
-                        section=embedding.section,
+                        page_index=embedding.page_index,
                         distance=distance,
                     )
                 )

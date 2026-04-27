@@ -1,8 +1,6 @@
 from pathlib import Path
 import enum
 import pymupdf
-import pymupdf4llm
-import re
 
 pymupdf.TOOLS.mupdf_display_errors(False)
 
@@ -11,11 +9,6 @@ class DocumentType(enum.Enum):
     ARXIV = "arxiv"
     DOI = "doi"
     URL = "url"
-
-
-omit_regex = re.compile(
-    r"\*\*==> [a-zA-Z]+ \[[0-9]+ x [0-9]+\] intentionally omitted <==\*\*\n\n"
-)
 
 
 class Document:
@@ -32,7 +25,7 @@ class Document:
         raise NotImplementedError("Subclasses must implement get_parent_folders method")
 
 
-class ReadError(Exception):
+class ReadError(BaseException):
     document_id: str
     message: str
 
@@ -40,9 +33,6 @@ class ReadError(Exception):
         self.document_id = document_id
         self.message = message
         super().__init__(f"Error reading document {document_id}: {message}")
-
-    def __reduce__(self):
-        return (ReadError, (self.document_id, self.message))
 
 
 class DownloadedDocument(Document):
@@ -60,26 +50,41 @@ class DownloadedDocument(Document):
         except Exception as e:
             return ReadError(self.identifier, str(e))
 
-    def get_text(self) -> str | ReadError:
-        try:
-            with pymupdf.open(self.path) as doc:
-                page_chunk_list = pymupdf4llm.to_markdown(
-                    doc,
-                    extract_words=False,
-                    footer=False,
-                    header=False,
-                    ignore_graphics=True,
-                    ignore_images=True,
-                    page_chunks=True,
-                    show_progress=False,
-                    use_ocr=False,
-                )
-        except Exception as e:
-            return ReadError(self.identifier, str(e))
-        all_text = "\n\n".join(page["text"] for page in page_chunk_list)
-        all_text = omit_regex.sub("", all_text)
-        return all_text
-
     @staticmethod
     def from_document(document: Document, path: Path) -> "DownloadedDocument":
         return DownloadedDocument(document.identifier, document.document_type, path)
+
+
+class PagedDocument(Document):
+    pages: list[str]
+    page_lens: list[int]
+    full_text: str
+
+    def __init__(self, identifier: str, document_type: DocumentType, pages: list[str]):
+        self.identifier = identifier
+        self.document_type = document_type
+        self.pages = pages
+        self.page_lens = [len(page) for page in pages]
+        self.full_text = "\n\n".join(pages)
+
+    @staticmethod
+    def from_downloaded_document(
+        document: DownloadedDocument,
+    ) -> "PagedDocument | ReadError":
+        pages_text = document.get_pages_text()
+        if isinstance(pages_text, ReadError):
+            return pages_text
+        return PagedDocument(document.identifier, document.document_type, pages_text)
+
+    def get_text(self) -> str:
+        return self.full_text
+
+    def start_index_to_page_index(self, start_index: int) -> int:
+        cumulative_length = 0
+        for i, page_len in enumerate(self.page_lens):
+            cumulative_length += page_len + 2  # +2 for the "\n\n" separator
+            if cumulative_length > start_index:
+                return i
+        return (
+            len(self.page_lens) - 1
+        )  # Return the last page index if start_index exceeds total length

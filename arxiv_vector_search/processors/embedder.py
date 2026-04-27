@@ -1,3 +1,4 @@
+from transformers import PreTrainedTokenizerBase
 from arxiv_vector_search.processors.splitter import SplitData
 from typing import TypeAlias
 import numpy as np
@@ -30,8 +31,8 @@ def create_model(model_name: str, **kwargs) -> SentenceTransformer:
 
 class Embedding(TypedDict):
     document_id: str | int
-    section: str
-    chunk_number: int
+    page_index: int
+    chunk_index: int
     embedding: SentenceEmbedding
 
 
@@ -49,15 +50,7 @@ class Embedder:
         if os.getenv("PYTORCH_TUNABLEOP_ENABLED", "0") == "1":
             safe_name = model_name.replace("/", "_")
             tuned_fname = f"tunableops_{safe_name}_{batch_size}.csv"
-            tuned_fname_actual = tuned_fname.replace(".csv", "0.csv")
-            tunable.enable(True)
             tunable.set_filename(tuned_fname)
-            tunable.set_max_tuning_duration(5)
-            tunable.set_max_tuning_iterations(20)
-            if os.path.exists(tuned_fname_actual):
-                tunable.tuning_enable(False)  # load existing, don't re-tune
-            else:
-                tunable.tuning_enable(True)  # tune on first warmup pass
         self.model = create_model(model_name, **kwargs)
 
     def encode_text(
@@ -93,12 +86,12 @@ class Embedder:
     def embed_documents(self, splits: list[SplitData]) -> list[Embedding]:
         texts = [split.text for split in splits]
 
-        embeddings = self.encode_text(texts, self.batch_size)
+        embeddings = self.encode_text(texts, self.batch_size, True)
         return [
             {
                 "document_id": split.identifier,
-                "section": split.section,
-                "chunk_number": split.chunk_index,
+                "page_index": split.page_index,
+                "chunk_index": split.chunk_index,
                 "embedding": embedding,
             }
             for split, embedding in zip(splits, embeddings)
@@ -112,3 +105,9 @@ class Embedder:
 
     def get_batch_size(self) -> int:
         return self.batch_size
+
+    def get_max_input_length(self) -> int:
+        return self.model.max_seq_length or 512
+
+    def get_tokenizer(self) -> PreTrainedTokenizerBase:
+        return self.model.tokenizer

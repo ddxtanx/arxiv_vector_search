@@ -1,3 +1,6 @@
+from arxiv_vector_search.processors.splitter import DEFAULT_CHUNK_SIZE
+from arxiv_vector_search.documents import DownloadError
+from arxiv_vector_search.documents.document import PagedDocument
 from arxiv_vector_search.processors.splitter import SplitData
 from arxiv_vector_search.db.tables import EmbeddingState
 from arxiv_vector_search.documents.document import DownloadedDocument, DocumentType
@@ -160,7 +163,13 @@ if __name__ == "__main__":
         downloader = DocumentDownloader()
         arxiv_downloader = ArxivDownloader()
         downloader.register_downloader(DocumentType.ARXIV, arxiv_downloader)
-        splitter = DocumentSplitter()
+        chunk_size = DEFAULT_CHUNK_SIZE
+        if embedder.get_max_input_length() < chunk_size:
+            chunk_size = embedder.get_max_input_length()
+        splitter = DocumentSplitter(
+            chunk_size,
+            # tokenizer=embedder.get_tokenizer()
+        )
         while True:
             batch = db.get_missing_embeddings_for_model(
                 embedder, limit=args.batch_size, offset=0
@@ -173,9 +182,13 @@ if __name__ == "__main__":
             print(
                 f"Downloaded {len(downloaded)} documents. Processing splits and embeddings..."
             )
-            dl_errs = [
-                doc for doc in downloaded if not isinstance(doc, DownloadedDocument)
-            ]
+            dl_errs = []
+            downloaded_docs = []
+            for result in downloaded:
+                if isinstance(result, DownloadError):
+                    dl_errs.append(result)
+                elif isinstance(result, DownloadedDocument):
+                    downloaded_docs.append(result)
             # for err in dl_errs:
             #     print(f"Error downloading document {err.document.identifier}: {err}")
             print(
@@ -187,10 +200,7 @@ if __name__ == "__main__":
                     [err.document for err in dl_errs],
                     EmbeddingState.DOWNLOAD_ERROR,
                 )
-            downloaded = [
-                doc for doc in downloaded if isinstance(doc, DownloadedDocument)
-            ]
-            split_docs = splitter.par_split_documents(downloaded, args.threads)
+            split_docs = splitter.par_split_documents(downloaded_docs, args.threads)
             downloader.clear_downloaders()
             del downloaded
             good_splits: list[SplitData] = []
@@ -255,7 +265,7 @@ if __name__ == "__main__":
                 scores[url] = []
                 pages[url] = set()
             scores[url].append(result.distance)
-            pages[url].add(result.page_number)
+            pages[url].add(result.page_index)
         sorted_by_min = sorted(
             urls,
             key=lambda url: min(scores[url]),
