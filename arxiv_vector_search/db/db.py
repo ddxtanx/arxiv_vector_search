@@ -1,3 +1,6 @@
+from sqlalchemy.orm import aliased
+from sqlalchemy import exists
+from sqlalchemy import literal
 from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 import numpy as np
@@ -18,6 +21,7 @@ from sqlalchemy import create_engine, Engine, delete, update, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import QueuePool
+from pgvector.sqlalchemy import avg
 
 
 class QueryResult:
@@ -326,6 +330,76 @@ class Database:
             results = session.execute(
                 select(EmbeddingType, Document, embedding_col)
                 .join(EmbeddingType.document)
+                .where(EmbeddingType.chunk_index != -1)
+                .order_by(embedding_col)
+                .limit(top_k)
+                .execution_options(readonly=True)
+            )
+            query_results = []
+            for embedding, doc, distance in results:
+                document = None
+                if doc.pdf_type == DocumentType.ARXIV:
+                    document = ArxivDocument(doc.identifier)
+                elif doc.pdf_type == DocumentType.URL:
+                    document = URLDocument(doc.identifier)
+                elif doc.pdf_type == DocumentType.DOI:
+                    document = DOIDocument(doc.identifier)
+                query_results.append(
+                    QueryResult(
+                        document=document,
+                        page_index=embedding.page_index,
+                        distance=distance,
+                    )
+                )
+            return query_results
+
+    def add_missing_doc_avgs_for_model(self, embedder: Embedder):
+        EmbeddingType = self.model_to_embedding_table.get(embedder.get_model_name())
+        with Session(self.engine) as session:
+            selected_alias = aliased(EmbeddingType, name="e1")
+            avg_col = avg(selected_alias.embedding).label("avg_embedding")
+            filter_alias = aliased(EmbeddingType, name="e2")
+            select_stmt = (
+                select(
+                    selected_alias.document_id,
+                    avg_col,
+                    literal(-1).label("chunk_index"),
+                    literal(0).label("page_index"),
+                )
+                .where(
+                    ~exists().where(
+                        (filter_alias.document_id == selected_alias.document_id)
+                        & (filter_alias.chunk_index == -1)
+                    )
+                )
+                .group_by(selected_alias.document_id)
+            )
+
+            insert_stmt = insert(EmbeddingType).from_select(
+                ["document_id", "embedding", "chunk_index", "page_index"], select_stmt
+            )
+            session.execute(insert_stmt)
+            session.commit()
+
+    def query_embeddings_avg(
+        self,
+        embedder: Embedder,
+        query_embedding: np.ndarray[tuple[int], np.dtype[np.float16]],
+        top_k: int,
+    ) -> list[QueryResult]:
+        if embedder.get_model_name() not in self.model_to_embedding_table:
+            self.create_embedding_table_for_model(embedder)
+        self.add_missing_doc_avgs_for_model(embedder)
+        EmbeddingType = self.model_to_embedding_table.get(embedder.get_model_name())
+        embedding_col = EmbeddingType.embedding.cosine_distance(query_embedding).label(
+            "distance"
+        )
+        with Session(self.engine) as session:
+            print("Querying database for similar document average embeddings...")
+            results = session.execute(
+                select(EmbeddingType, Document, embedding_col)
+                .join(EmbeddingType.document)
+                .where(EmbeddingType.chunk_index == -1)
                 .order_by(embedding_col)
                 .limit(top_k)
                 .execution_options(readonly=True)

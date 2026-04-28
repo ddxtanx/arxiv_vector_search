@@ -1,8 +1,8 @@
+from arxiv_vector_search.processors.splitter import SplitData
 import math
 from arxiv_vector_search.db import Database
 from arxiv_vector_search.processors import Embedder, DocumentSplitter
 from arxiv_vector_search.documents import (
-    SplitDocument,
     DownloadedDocument,
     DocumentDownloader,
     DocumentType,
@@ -81,10 +81,14 @@ if __name__ == "__main__":
         doc for doc in downloaded_docs if isinstance(doc, DownloadedDocument)
     ]
 
-    splitter = DocumentSplitter()
+    default_model = Embedder(model)
+    max_tokens = default_model.get_max_input_length()
+    chunk_size = max_tokens if max_tokens < 512 else 512
+
+    splitter = DocumentSplitter(chunk_size, tokenizer=default_model.get_tokenizer())
     splits = splitter.par_split_documents(downloaded_docs, 12)
     texts = [
-        chunk.text for doc in splits for chunk in doc if isinstance(doc, SplitDocument)
+        split.text for split in splits if isinstance(split, SplitData) and split.text
     ]
     del splits
     del splitter

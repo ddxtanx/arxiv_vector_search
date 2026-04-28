@@ -34,6 +34,9 @@ class ReadError(BaseException):
         self.message = message
         super().__init__(f"Error reading document {document_id}: {message}")
 
+    def __reduce__(self):
+        return ReadError, (self.document_id, self.message)
+
 
 class DownloadedDocument(Document):
     path: Path

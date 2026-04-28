@@ -16,6 +16,7 @@ def get_params() -> Any:
     base = {
         "device": "cuda",
         "model_kwargs": {"dtype": torch.float16, "attn_implementation": "sdpa"},
+        "processor_kwargs": {"use_fast": True},
     }
     return base
 
@@ -83,10 +84,12 @@ class Embedder:
         torch.cuda.empty_cache()
         return embeddings
 
-    def embed_documents(self, splits: list[SplitData]) -> list[Embedding]:
+    def embed_documents(
+        self, splits: list[SplitData], show_progress: bool = False
+    ) -> list[Embedding]:
         texts = [split.text for split in splits]
 
-        embeddings = self.encode_text(texts, self.batch_size, True)
+        embeddings = self.encode_text(texts, self.batch_size, show_progress)
         return [
             {
                 "document_id": split.identifier,

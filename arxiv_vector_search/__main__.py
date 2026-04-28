@@ -164,12 +164,13 @@ if __name__ == "__main__":
         arxiv_downloader = ArxivDownloader()
         downloader.register_downloader(DocumentType.ARXIV, arxiv_downloader)
         chunk_size = DEFAULT_CHUNK_SIZE
-        if embedder.get_max_input_length() < chunk_size:
-            chunk_size = embedder.get_max_input_length()
-        splitter = DocumentSplitter(
-            chunk_size,
-            # tokenizer=embedder.get_tokenizer()
-        )
+        max_acceptable_chunk_size = int(embedder.get_max_input_length() * 0.925)
+        if chunk_size > max_acceptable_chunk_size:
+            print(
+                f"Default chunk size of {chunk_size} is too large for the model's max input length of {embedder.get_max_input_length()}. Setting chunk size to {max_acceptable_chunk_size}."
+            )
+            chunk_size = max_acceptable_chunk_size
+        splitter = DocumentSplitter(chunk_size, tokenizer=embedder.get_tokenizer())
         while True:
             batch = db.get_missing_embeddings_for_model(
                 embedder, limit=args.batch_size, offset=0
@@ -232,6 +233,11 @@ if __name__ == "__main__":
             print(
                 f"Generated embeddings for {num_successful_splits} document chunks. Adding to database..."
             )
+            if not embeddings:
+                print(
+                    "No embeddings generated for this batch. Moving on to next batch..."
+                )
+                continue
             db.add_embeddings(embeddings, embedder)
             del embeddings
             good_batch = [doc for doc in batch if doc.identifier in good_ids]
@@ -270,20 +276,16 @@ if __name__ == "__main__":
             urls,
             key=lambda url: min(scores[url]),
         )
-        sorted_by_avg = sorted(
-            urls,
-            key=lambda url: sum(scores[url]) / len(scores[url]),
-        )
         top_10_by_min = sorted_by_min[:10]
-        top_10_by_avg = sorted_by_avg[:10]
 
         print("Top 10 results sorted by minimum distance:")
         for url in top_10_by_min:
             print(
                 f"URL: {url}, Min Distance: {min(scores[url]):.4f}, Pages: {sorted(pages[url])}"
             )
-        print("\nTop 10 results sorted by average distance:")
-        for url in top_10_by_avg:
-            print(
-                f"URL: {url}, Avg Distance: {sum(scores[url]) / len(scores[url]):.4f}, Pages: {sorted(pages[url])}"
-            )
+
+        # top_10_by_avg = db.query_embeddings_avg(embedder, query_embedding, top_k=10)
+        # print("\nTop 10 results sorted by average distance:")
+        # for query_result in top_10_by_avg:
+        #     url = query_result.document.get_url()
+        #     print(f"URL: {url}, Avg Distance: {query_result.distance:.4f}")

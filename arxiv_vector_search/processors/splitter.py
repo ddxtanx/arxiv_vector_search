@@ -1,4 +1,5 @@
 from transformers import PreTrainedTokenizerBase
+from functools import lru_cache
 from arxiv_vector_search.documents.document import PagedDocument
 import traceback
 from arxiv_vector_search.documents import (
@@ -7,11 +8,8 @@ from arxiv_vector_search.documents import (
 )
 from langchain_text_splitters import (
     RecursiveCharacterTextSplitter,
-    MarkdownHeaderTextSplitter,
 )
-from multiprocessing import get_context
 from pathos.multiprocessing import ProcessingPool as Pool
-import traceback
 
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_CHUNK_OVERLAP = 0.15
@@ -26,6 +24,9 @@ class SplitError(BaseException):
         self.document_id = document_id
         self.message = message
         super().__init__(f"Error splitting document {document_id}: {message}")
+
+    def __reduce__(self):
+        return SplitError, (self.document_id, self.message)
 
 
 class SplitData:
@@ -63,6 +64,8 @@ class DocumentSplitter:
             chunk_size = DEFAULT_CHUNK_SIZE
         if not chunk_overlap:
             chunk_overlap = int(chunk_size * DEFAULT_CHUNK_OVERLAP)
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
         kwargs = {
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
@@ -80,22 +83,25 @@ class DocumentSplitter:
                 "",
             ],
             "add_start_index": True,
+            "length_function": len,
         }
         if tokenizer is not None:
-            self.recursive_splitter = (
-                RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
-                    tokenizer,
-                    **kwargs,
+
+            @lru_cache(maxsize=100000)
+            def token_length_function(text: str) -> int:
+                return len(
+                    tokenizer.encode(text, add_special_tokens=False, verbose=False)
                 )
-            )
+
+            kwargs["length_function"] = token_length_function
+
         else:
             self.chunk_size = int(chunk_size * chunk_factor)
             self.chunk_overlap = int(chunk_overlap * chunk_factor)
             kwargs["chunk_size"] = self.chunk_size
             kwargs["chunk_overlap"] = self.chunk_overlap
-            self.recursive_splitter = RecursiveCharacterTextSplitter(
-                **kwargs,
-            )
+
+        self.recursive_splitter = RecursiveCharacterTextSplitter(**kwargs)
 
     def split_document(
         self, document: DownloadedDocument
