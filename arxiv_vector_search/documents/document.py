@@ -1,6 +1,21 @@
 from pathlib import Path
 import enum
 import pymupdf
+import re
+
+_DEHYPHENATE = re.compile(r"-\n(\w)")
+_MID_WORD_BREAK = re.compile(r"(?<=[a-z])\n(?=[a-z])")
+_PAGE_NUMBER = re.compile(r"\n\s*\d{1,3}\s*\n")
+_EXCESS_WHITESPACE = re.compile(r"[ \t]{2,}")
+_SYMBOL_LINE = re.compile(r"\n[^\w\s]{3,}\n")
+
+regex_pass = [
+    (_DEHYPHENATE, r"\1"),
+    (_MID_WORD_BREAK, " "),
+    (_PAGE_NUMBER, "\n"),
+    (_EXCESS_WHITESPACE, " "),
+    (_SYMBOL_LINE, "\n"),
+]
 
 pymupdf.TOOLS.mupdf_display_errors(False)
 
@@ -68,7 +83,17 @@ class PagedDocument(Document):
         self.document_type = document_type
         self.pages = pages
         self.page_lens = [len(page) for page in pages]
-        self.full_text = "\n\n".join(pages)
+        self.full_text = self.__create_full_text()
+
+    def __create_full_text(self) -> str:
+        full_text = ""
+        for i, page in enumerate(self.pages):
+            for regex, replacement in regex_pass:
+                page = regex.sub(replacement, page)
+            page = page.strip()
+            self.page_lens[i] = len(page)
+            full_text += page + "\n\n"
+        return full_text.strip()
 
     @staticmethod
     def from_downloaded_document(

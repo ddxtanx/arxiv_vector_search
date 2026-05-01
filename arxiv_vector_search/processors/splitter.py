@@ -9,7 +9,7 @@ from arxiv_vector_search.documents import (
 from langchain_text_splitters import (
     RecursiveCharacterTextSplitter,
 )
-from pathos.multiprocessing import ProcessingPool as Pool
+from multiprocess import get_context
 
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_CHUNK_OVERLAP = 0.15
@@ -52,6 +52,7 @@ class DocumentSplitter:
     chunk_size: int
     chunk_overlap: int
     recursive_splitter: RecursiveCharacterTextSplitter
+    prefix_length: int
 
     def __init__(
         self,
@@ -59,6 +60,7 @@ class DocumentSplitter:
         chunk_overlap: int | None = None,
         chunk_factor: float = DEFAULT_CHUNK_FACTOR,
         tokenizer: PreTrainedTokenizerBase | None = None,
+        prefix: str = "",
     ):
         if not chunk_size:
             chunk_size = DEFAULT_CHUNK_SIZE
@@ -66,6 +68,7 @@ class DocumentSplitter:
             chunk_overlap = int(chunk_size * DEFAULT_CHUNK_OVERLAP)
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.prefix_length = len(prefix)
         kwargs = {
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
@@ -83,14 +86,18 @@ class DocumentSplitter:
                 "",
             ],
             "add_start_index": True,
-            "length_function": len,
+            "length_function": lambda text: len(text) + self.prefix_length,
         }
         if tokenizer is not None:
+            self.prefix_length = len(
+                tokenizer.encode(prefix, add_special_tokens=False, verbose=False)
+            )
 
             @lru_cache(maxsize=100000)
             def token_length_function(text: str) -> int:
-                return len(
-                    tokenizer.encode(text, add_special_tokens=False, verbose=False)
+                return (
+                    len(tokenizer.encode(text, add_special_tokens=False, verbose=False))
+                    + self.prefix_length
                 )
 
             kwargs["length_function"] = token_length_function
@@ -152,7 +159,8 @@ class DocumentSplitter:
         if num_workers <= 1:
             return self.split_documents(documents)
         chunk_size = max(1, len(documents) // num_workers)
-        with Pool(nodes=num_workers) as pool:
+        ctx = get_context("forkserver")
+        with ctx.Pool(processes=num_workers) as pool:
             results = list(
                 pool.imap(self.split_document, documents, chunksize=chunk_size)
             )

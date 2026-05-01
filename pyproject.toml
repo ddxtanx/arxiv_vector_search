@@ -14,7 +14,9 @@ dependencies = [
   "pymupdf",
   "flash-attn==2.8.4",
   "kagglehub[pandas-datasets]",
-  "pathos",
+  "multiprocess",
+  "dill",
+  "FlagEmbedding",
   "ninja",
   "packaging",
 ]

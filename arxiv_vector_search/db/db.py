@@ -65,6 +65,8 @@ class Database:
                     name=embedder.get_model_name(),
                     batch_size=embedder.get_batch_size(),
                     embedding_dim=embedder.get_embedding_dim(),
+                    document_prefix=embedder.document_prefix,
+                    query_prefix=embedder.query_prefix,
                 )
                 .on_conflict_do_nothing(index_elements=["name"])
             )

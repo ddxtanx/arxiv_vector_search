@@ -1,3 +1,4 @@
+from arxiv_vector_search.processors import TOKEN_OVERHEAD_FACTOR
 from arxiv_vector_search.processors.splitter import SplitData
 import math
 from arxiv_vector_search.db import Database
@@ -26,25 +27,29 @@ def time_encode(model_name, texts, batch_size):
     total_time = 0
     try:
         print("Warming up...")
+        attempt_size = 10 * batch_size
         for _ in range(iters):
-            attempt_size = 10 * batch_size
             test_run = embedder.encode_text(
                 texts[:attempt_size], batch_size, show_progress=True
             )
+            attempt_size *= 10
             del test_run
     except torch.OutOfMemoryError:
         return float("inf")
     print("Running timed tests...")
+    attempt_size = 1000 * batch_size
     for _ in range(iters):
         start_time = time.time()
         try:
-            encodings = embedder.encode_text(texts, batch_size, show_progress=True)
+            encodings = embedder.encode_text(
+                texts[:attempt_size], batch_size, show_progress=True
+            )
             del encodings
         except torch.OutOfMemoryError:
             return float("inf")
         end_time = time.time()
         total_time += end_time - start_time
-    return total_time / iters
+    return total_time / (iters * attempt_size)
 
 
 if __name__ == "__main__":
@@ -68,7 +73,7 @@ if __name__ == "__main__":
     docs = db.get_documents()
     random.shuffle(docs)
 
-    num_docs = 350
+    num_docs = 5000
     docs = docs[:num_docs]
 
     ax_downloader = ArxivDownloader()
@@ -82,8 +87,12 @@ if __name__ == "__main__":
     ]
 
     default_model = Embedder(model)
-    max_tokens = default_model.get_max_input_length()
-    chunk_size = max_tokens if max_tokens < 512 else 512
+    chunk_size = 512
+    if chunk_size > default_model.get_max_input_length() * TOKEN_OVERHEAD_FACTOR:
+        chunk_size = math.floor(
+            default_model.get_max_input_length() * TOKEN_OVERHEAD_FACTOR
+        )
+        print(f"Chunk size too large for model, reducing to {chunk_size} tokens")
 
     splitter = DocumentSplitter(chunk_size, tokenizer=default_model.get_tokenizer())
     splits = splitter.par_split_documents(downloaded_docs, 12)
@@ -97,14 +106,15 @@ if __name__ == "__main__":
     del doc_downloader
     del ax_downloader
     del docs
-    gc.collect(0)
+    del default_model
+    gc.collect()
 
-    best_batch_size = 32
+    best_batch_size = 8
     best_time = float("inf")
 
     times = {}
 
-    start = 8
+    start = best_batch_size
 
     while start < len(texts):
         time_taken = time_encode(model, texts, start)
@@ -119,25 +129,6 @@ if __name__ == "__main__":
             best_time = batch_time
             best_batch_size = batch_size
 
-    start = best_batch_size // 2
-    end = best_batch_size * 2
-
-    while end - start > 2:
-        mid = (start + end) // 2
-        print(f"start: {start}, mid: {mid}, end: {end}")
-        end_time = time_encode(model, texts, end)
-        if end_time == float("inf"):
-            end -= 1
-            continue
-        mid_time = time_encode(model, texts, mid)
-        if abs(mid_time - end_time) < TIME_TOL:
-            start_time = time_encode(model, texts, start)
-            if abs(start_time - mid_time) < TIME_TOL:
-                start = mid
-                break
-            else:
-                end = mid
-        else:
-            start = mid
-    best_batch_size = start
-    print(f"For model {model}, best batch size is {best_batch_size}")
+    print(
+        f"Best batch size: {best_batch_size} with time {best_time:.4f} seconds per text"
+    )

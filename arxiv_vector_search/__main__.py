@@ -1,18 +1,22 @@
-from arxiv_vector_search.processors.splitter import DEFAULT_CHUNK_SIZE
 from arxiv_vector_search.documents import DownloadError
 from arxiv_vector_search.documents.document import PagedDocument
-from arxiv_vector_search.processors.splitter import SplitData
+from arxiv_vector_search.processors.splitter import SplitData, DocumentSplitter
+from arxiv_vector_search.processors.embedder import (
+    TOKEN_CHUNKSIZE,
+    Embedder,
+    TOKEN_OVERHEAD_FACTOR,
+)
 from arxiv_vector_search.db.tables import EmbeddingState
 from arxiv_vector_search.documents.document import DownloadedDocument, DocumentType
 from arxiv_vector_search.documents.arxiv import ArxivDownloader
 from .db import Database
-from .processors import Embedder, DocumentSplitter
 from .documents import DocumentDownloader
 import sys
 import os
 from argparse import ArgumentParser, BooleanOptionalAction
 from dataclasses import dataclass
 import gc
+import codecs
 
 batch_sizes = {
     "sentence-transformers/all-MiniLM-L6-v2": 512,
@@ -36,6 +40,11 @@ class Args:
     flush_errors: bool
     update_arxiv_metadata: bool
     add_docs_as_missing: bool
+
+
+def unescaped_input(prompt: str) -> str:
+    """Get user input without interpreting escape sequences."""
+    return codecs.decode(input(prompt), "unicode_escape")
 
 
 if __name__ == "__main__":
@@ -101,17 +110,18 @@ if __name__ == "__main__":
         for i, model in enumerate(models):
             print(f"{i}: {model.name}")
         model_idx = input(
-            "Enter the number corresponding to the model you want to use: "
+            "Enter the number corresponding to the model you want to use or the name of the model if it is not included above:"
         )
-        while (
-            not model_idx.isdigit()
-            or int(model_idx) < 0
-            or int(model_idx) >= len(models)
-        ):
-            model_idx = input("Invalid input. Please enter a valid number: ")
-        args.model = models[int(model_idx)].name
+        if not model_idx.isdigit():
+            args.model = model_idx
+        else:
+            while int(model_idx) < 0 or int(model_idx) >= len(models):
+                model_idx = input("Invalid input. Please enter a valid number: ")
+            args.model = models[int(model_idx)].name
     model_names_in_db = set(model.name for model in models)
     embedding_batch_size = 0
+    model_doc_prefix = ""
+    model_query_prefix = ""
     if args.model not in model_names_in_db:
         if args.model in batch_sizes:
             embedding_batch_size = batch_sizes[args.model]
@@ -121,11 +131,22 @@ if __name__ == "__main__":
                     "Model not found in database and no default batch size found. Please enter a batch size for embedding: "
                 )
             )
+            model_doc_prefix = unescaped_input(
+                "Enter a prefix to add to documents before embedding for this model (optional, can be left blank, and will be unescaped): "
+            )
+            model_query_prefix = unescaped_input(
+                "Enter a prefix to add to queries before embedding for this model (optional, can be left blank, and will be unescaped): "
+            )
     else:
         embedding_batch_size = next(
             model.batch_size for model in models if model.name == args.model
         )
-    embedder = Embedder(args.model, embedding_batch_size)
+    embedder = Embedder(
+        args.model,
+        embedding_batch_size,
+        document_prefix=model_doc_prefix,
+        query_prefix=model_query_prefix,
+    )
     if args.model not in model_names_in_db:
         db.add_model(embedder)
     db.create_embedding_table_for_model(embedder)
@@ -163,14 +184,20 @@ if __name__ == "__main__":
         downloader = DocumentDownloader()
         arxiv_downloader = ArxivDownloader()
         downloader.register_downloader(DocumentType.ARXIV, arxiv_downloader)
-        chunk_size = DEFAULT_CHUNK_SIZE
-        max_acceptable_chunk_size = int(embedder.get_max_input_length() * 0.925)
+        chunk_size = TOKEN_CHUNKSIZE
+        max_acceptable_chunk_size = int(
+            embedder.get_max_input_length() * TOKEN_OVERHEAD_FACTOR
+        )
         if chunk_size > max_acceptable_chunk_size:
             print(
                 f"Default chunk size of {chunk_size} is too large for the model's max input length of {embedder.get_max_input_length()}. Setting chunk size to {max_acceptable_chunk_size}."
             )
             chunk_size = max_acceptable_chunk_size
-        splitter = DocumentSplitter(chunk_size, tokenizer=embedder.get_tokenizer())
+        splitter = DocumentSplitter(
+            chunk_size,
+            tokenizer=embedder.get_tokenizer(),
+            prefix=embedder.document_prefix,
+        )
         while True:
             batch = db.get_missing_embeddings_for_model(
                 embedder, limit=args.batch_size, offset=0
@@ -225,7 +252,10 @@ if __name__ == "__main__":
             print(
                 f"Generating embeddings for {num_successful_splits} document chunks. This may take a while..."
             )
-            embeddings = embedder.embed_documents(good_splits)
+            embeddings = embedder.embed_documents(
+                good_splits,
+                show_progress=True,
+            )
             good_ids = set(split.identifier for split in good_splits)
             del split_docs
             del good_splits
@@ -254,9 +284,7 @@ if __name__ == "__main__":
             gc.collect()
 
     if args.query:
-        query_embedding = embedder.model.encode(
-            args.query, convert_to_numpy=True, normalize_embeddings=True
-        )
+        query_embedding = embedder.embed_queries([args.query])[0]
         print("Query embedding generated. Performing vector search...")
         results = db.query_embeddings(embedder, query_embedding, top_k=1000)
         print(

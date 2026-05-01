@@ -22,6 +22,10 @@ class Model(Base):
     embedding_metadatas: Mapped[List["EmbeddingMetadata"]] = relationship(
         "EmbeddingMetadata", back_populates="model"
     )
+    query_prefix: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    document_prefix: Mapped[str] = mapped_column(
+        String(128), nullable=False, default=""
+    )
 
 
 class Document(Base):
