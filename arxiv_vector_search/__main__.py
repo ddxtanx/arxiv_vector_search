@@ -80,11 +80,6 @@ if __name__ == "__main__":
         action=BooleanOptionalAction,
         help="Whether to update state with the arxiv metadata json file.",
     )
-    _ = parser.add_argument(
-        "--add_docs_as_missing",
-        action=BooleanOptionalAction,
-        help="Whether to add documents in the database that are not yet added as missing, so they will be processed",
-    )
 
     args: Args = parser.parse_args()
     db_url = os.getenv("DATABASE_URL")
@@ -166,10 +161,8 @@ if __name__ == "__main__":
         documents = create_arxiv_documents()
         db.add_documents(documents)
 
-    if args.add_docs_as_missing:
-        db.add_missing_metadata(embedder)
-
     if args.embed:
+        db.add_missing_metadata(embedder)
         downloader = DocumentDownloader()
         arxiv_downloader = ArxivDownloader()
         downloader.register_downloader(DocumentType.ARXIV, arxiv_downloader)
