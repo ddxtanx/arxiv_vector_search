@@ -18,14 +18,6 @@ from dataclasses import dataclass
 import gc
 import codecs
 
-batch_sizes = {
-    "sentence-transformers/all-MiniLM-L6-v2": 512,
-    "google/embeddinggemma-300m": 8,
-    "WhereIsAI/UAE-Large-V1": 9,
-    "Octen/Octen-Embedding-0.6B": 4,
-    "ibm-granite/granite-embedding-small-english-r2": 64,
-}
-
 MIN_LEN = 128  # minimum character length for a chunk to be embedded. This is to filter out very short chunks that may not be useful for embedding and just waste space and compute.
 
 
@@ -123,20 +115,17 @@ if __name__ == "__main__":
     model_doc_prefix = ""
     model_query_prefix = ""
     if args.model not in model_names_in_db:
-        if args.model in batch_sizes:
-            embedding_batch_size = batch_sizes[args.model]
-        else:
-            embedding_batch_size = int(
-                input(
-                    "Model not found in database and no default batch size found. Please enter a batch size for embedding: "
-                )
+        embedding_batch_size = int(
+            input(
+                "Model not found in database and no default batch size found. Please enter a batch size for embedding: "
             )
-            model_doc_prefix = unescaped_input(
-                "Enter a prefix to add to documents before embedding for this model (optional, can be left blank, and will be unescaped): "
-            )
-            model_query_prefix = unescaped_input(
-                "Enter a prefix to add to queries before embedding for this model (optional, can be left blank, and will be unescaped): "
-            )
+        )
+        model_doc_prefix = unescaped_input(
+            "Enter a prefix to add to documents before embedding for this model (optional, can be left blank, and will be unescaped): "
+        )
+        model_query_prefix = unescaped_input(
+            "Enter a prefix to add to queries before embedding for this model (optional, can be left blank, and will be unescaped): "
+        )
     else:
         embedding_batch_size = next(
             model.batch_size for model in models if model.name == args.model

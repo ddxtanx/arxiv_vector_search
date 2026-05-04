@@ -19,36 +19,39 @@ import gc
 
 TIME_TOL = 0.1
 iters = 3
+ATTEMPT_BATCHES = 100
 
 
-def time_encode(model_name, texts, batch_size):
+def time_encode(embedder, texts, batch_size):
     print(f"Testing batch size {batch_size}")
-    embedder = Embedder(model_name, batch_size)
     total_time = 0
+    attempt_size = batch_size * ATTEMPT_BATCHES
+    texts_batch = random.sample(texts, min(attempt_size, len(texts)))
+    attempt_size = len(texts_batch)
     try:
         print("Warming up...")
-        attempt_size = 10 * batch_size
         for _ in range(iters):
-            test_run = embedder.encode_text(
-                texts[:attempt_size], batch_size, show_progress=True
-            )
-            attempt_size *= 10
+            test_run = embedder.encode_text(texts_batch, batch_size, show_progress=True)
             del test_run
+            gc.collect()
     except torch.OutOfMemoryError:
         return float("inf")
     print("Running timed tests...")
-    attempt_size = 1000 * batch_size
     for _ in range(iters):
         start_time = time.time()
         try:
             encodings = embedder.encode_text(
-                texts[:attempt_size], batch_size, show_progress=True
+                texts_batch, batch_size, show_progress=True
             )
-            del encodings
         except torch.OutOfMemoryError:
             return float("inf")
         end_time = time.time()
+        del encodings
+        gc.collect()
         total_time += end_time - start_time
+    del embedder
+    del texts_batch
+    gc.collect()
     return total_time / (iters * attempt_size)
 
 
@@ -70,6 +73,8 @@ if __name__ == "__main__":
     except ValueError:
         print("Not a number, interpreting it as a model name")
 
+    default_model = Embedder(model)
+
     docs = db.get_documents()
     random.shuffle(docs)
 
@@ -86,7 +91,6 @@ if __name__ == "__main__":
         doc for doc in downloaded_docs if isinstance(doc, DownloadedDocument)
     ]
 
-    default_model = Embedder(model)
     chunk_size = 512
     if chunk_size > default_model.get_max_input_length() * TOKEN_OVERHEAD_FACTOR:
         chunk_size = math.floor(
@@ -106,10 +110,9 @@ if __name__ == "__main__":
     del doc_downloader
     del ax_downloader
     del docs
-    del default_model
     gc.collect()
 
-    best_batch_size = 8
+    best_batch_size = 32
     best_time = float("inf")
 
     times = {}
@@ -117,7 +120,8 @@ if __name__ == "__main__":
     start = best_batch_size
 
     while start < len(texts):
-        time_taken = time_encode(model, texts, start)
+        time_taken = time_encode(default_model, texts, start)
+        print(f"Batch size {start} took {time_taken:.4} seconds per text")
         gc.collect()
         if time_taken == float("inf"):
             break
@@ -130,5 +134,5 @@ if __name__ == "__main__":
             best_batch_size = batch_size
 
     print(
-        f"Best batch size: {best_batch_size} with time {best_time:.4f} seconds per text"
+        f"Best batch size: {best_batch_size} with time {best_time:.4} seconds per text now tuning"
     )

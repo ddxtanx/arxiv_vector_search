@@ -9,6 +9,7 @@ from torch.nn.attention import sdpa_kernel, SDPBackend
 from sentence_transformers import SentenceTransformer
 import os
 import torch.cuda.tunable as tunable
+from enum import Enum
 
 SentenceEmbedding: TypeAlias = np.ndarray[tuple[int], np.dtype[np.float16]]
 
@@ -16,15 +17,25 @@ TOKEN_CHUNKSIZE = 512
 TOKEN_OVERHEAD_FACTOR = 0.925
 
 
+class EmbeddingType(Enum):
+    DOCUMENT = "document"
+    QUERY = "query"
+    GENERIC = "generic"
+
+
 def get_params() -> Any:
     base = {
         "device": "cuda",
         "model_kwargs": {"dtype": torch.float16, "attn_implementation": "sdpa"},
-        "processor_kwargs": {"use_fast": True, "model_max_length": TOKEN_CHUNKSIZE},
+        "processor_kwargs": {
+            "use_fast": True,
+        },
         "config_kwargs": {
-            "torch_dtype": torch.float16,
+            "dtype": torch.float16,
             "use_memory_efficient_attention": True,
         },
+        "trust_remote_code": True,
+        "prompts": {"query": "", "document": ""},
     }
     return base
 
@@ -35,14 +46,11 @@ def create_model(model_name: str, **kwargs) -> SentenceTransformer:
     model = SentenceTransformer(model_name, **params)
     model.eval()
     model.to("cuda").half()
-    model[0].auto_model = torch.compile(
-        model[0].auto_model, mode="reduce-overhead", dynamic=False
-    )
     if model.max_seq_length is None or model.max_seq_length > TOKEN_CHUNKSIZE:
         chunksize = TOKEN_CHUNKSIZE
         model.max_seq_length = chunksize
         model.tokenizer.model_max_length = chunksize
-        model.tokenizer.padding = "max_length"
+    model.compile(mode="max-autotune", dynamic=False, fullgraph=True)
     return model
 
 
@@ -86,7 +94,22 @@ class Embedder:
         texts: list[str],
         batch_size: int,
         show_progress: bool = False,
+        embedding_type: EmbeddingType = EmbeddingType.GENERIC,
     ) -> list[SentenceEmbedding]:
+        embedding_function = self.model.encode
+
+        prompt = ""
+        task = "retrieval"
+        if embedding_type == EmbeddingType.QUERY:
+            prompt = self.query_prefix
+            task = "query"
+            embedding_function = self.model.encode_query
+        elif embedding_type == EmbeddingType.DOCUMENT:
+            prompt = self.document_prefix
+            task = "document"
+            embedding_function = self.model.encode
+        if prompt is None:
+            prompt = ""
         with (
             torch.inference_mode(),
             sdpa_kernel(
@@ -97,16 +120,17 @@ class Embedder:
                 ],
                 set_priority=True,
             ),
-            torch.autocast("cuda", dtype=torch.float16),
         ):
             embeddings = (
-                self.model.encode(
+                embedding_function(
                     texts,
                     batch_size=batch_size,
                     convert_to_numpy=False,
                     convert_to_tensor=True,
                     normalize_embeddings=True,
                     show_progress_bar=show_progress,
+                    prompt=prompt,
+                    task=task,
                 )
                 .half()
                 .cpu()
@@ -119,10 +143,13 @@ class Embedder:
         self, splits: list[SplitData], show_progress: bool = False
     ) -> list[Embedding]:
         texts = [split.text for split in splits]
-        if self.document_prefix:
-            texts = [self.document_prefix + text for text in texts]
 
-        embeddings = self.encode_text(texts, self.batch_size, show_progress)
+        embeddings = self.encode_text(
+            texts,
+            self.batch_size,
+            show_progress,
+            embedding_type=EmbeddingType.DOCUMENT,
+        )
         return [
             {
                 "document_id": split.identifier,
@@ -136,9 +163,9 @@ class Embedder:
     def embed_queries(
         self, queries: list[str], show_progress: bool = False
     ) -> list[SentenceEmbedding]:
-        if self.query_prefix:
-            queries = [self.query_prefix + query for query in queries]
-        return self.encode_text(queries, self.batch_size, show_progress)
+        return self.encode_text(
+            queries, self.batch_size, show_progress, embedding_type=EmbeddingType.QUERY
+        )
 
     def get_model_name(self) -> str:
         return self.model_name
