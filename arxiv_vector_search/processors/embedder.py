@@ -26,13 +26,17 @@ class EmbeddingType(Enum):
 def get_params() -> Any:
     base = {
         "device": "cuda",
-        "model_kwargs": {"dtype": torch.float16, "attn_implementation": "sdpa"},
+        "model_kwargs": {
+            "dtype": torch.float16,
+            "attn_implementation": "flash_attention_2",
+        },
         "processor_kwargs": {
             "use_fast": True,
         },
         "config_kwargs": {
             "dtype": torch.float16,
             "use_memory_efficient_attention": True,
+            "_attn_implementation": "flash_attention_2",
         },
         "trust_remote_code": True,
         "prompts": {"query": "", "document": ""},
@@ -43,7 +47,12 @@ def get_params() -> Any:
 def create_model(model_name: str, **kwargs) -> SentenceTransformer:
     params = get_params()
     params.update(kwargs)
-    model = SentenceTransformer(model_name, **params)
+    try:
+        model = SentenceTransformer(model_name, **params)
+    except ValueError as _:
+        params["model_kwargs"]["attn_implementation"] = "sdpa"
+        params["config_kwargs"]["_attn_implementation"] = "sdpa"
+        model = SentenceTransformer(model_name, **params)
     model.eval()
     model.to("cuda").half()
     if model.max_seq_length is None or model.max_seq_length > TOKEN_CHUNKSIZE:
@@ -96,18 +105,14 @@ class Embedder:
         show_progress: bool = False,
         embedding_type: EmbeddingType = EmbeddingType.GENERIC,
     ) -> list[SentenceEmbedding]:
-        embedding_function = self.model.encode
-
         prompt = ""
         task = "retrieval"
         if embedding_type == EmbeddingType.QUERY:
             prompt = self.query_prefix
             task = "query"
-            embedding_function = self.model.encode_query
         elif embedding_type == EmbeddingType.DOCUMENT:
             prompt = self.document_prefix
             task = "document"
-            embedding_function = self.model.encode
         if prompt is None:
             prompt = ""
         with (
@@ -122,7 +127,7 @@ class Embedder:
             ),
         ):
             embeddings = (
-                embedding_function(
+                self.model.encode(
                     texts,
                     batch_size=batch_size,
                     convert_to_numpy=False,

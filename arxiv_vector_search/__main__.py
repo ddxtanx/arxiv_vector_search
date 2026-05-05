@@ -262,6 +262,7 @@ if __name__ == "__main__":
                 good_batch,
                 EmbeddingState.EMBEDDED,
             )
+            del good_batch
             print("Batch processing complete. Moving on to next batch...")
             gc.collect()
 

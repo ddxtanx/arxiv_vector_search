@@ -93,7 +93,7 @@ class DocumentSplitter:
                 tokenizer.encode(prefix, add_special_tokens=False, verbose=False)
             )
 
-            @lru_cache(maxsize=100000)
+            @lru_cache(maxsize=10000)
             def token_length_function(text: str) -> int:
                 return (
                     len(tokenizer.encode(text, add_special_tokens=False, verbose=False))
