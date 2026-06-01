@@ -1,3 +1,4 @@
+import traceback
 import math
 from transformers import PreTrainedTokenizerBase
 from arxiv_vector_search.processors.splitter import SplitData
@@ -37,28 +38,30 @@ def get_params() -> Any:
             "dtype": torch.float16,
             "use_memory_efficient_attention": True,
             "_attn_implementation": "flash_attention_2",
+            "unpad_inputs": True,
         },
         "trust_remote_code": True,
-        "prompts": {"query": "", "document": ""},
     }
     return base
 
 
-def create_model(model_name: str, **kwargs) -> SentenceTransformer:
+def create_model(model_name: str, chunk_size: int, **kwargs) -> SentenceTransformer:
     params = get_params()
     params.update(kwargs)
     try:
         model = SentenceTransformer(model_name, **params)
-    except ValueError as _:
+    except ValueError as e:
+        traceback.print_exception(e)
         params["model_kwargs"]["attn_implementation"] = "sdpa"
         params["config_kwargs"]["_attn_implementation"] = "sdpa"
+        del params["config_kwargs"]["unpad_inputs"]
         model = SentenceTransformer(model_name, **params)
     model.eval()
     model.to("cuda").half()
-    if model.max_seq_length is None or model.max_seq_length > TOKEN_CHUNKSIZE:
-        chunksize = TOKEN_CHUNKSIZE
-        model.max_seq_length = chunksize
-        model.tokenizer.model_max_length = chunksize
+    # cur_seq_len = model.max_seq_length
+    # resized = math.ceil(chunk_size / TOKEN_OVERHEAD_FACTOR)
+    # if resized < cur_seq_len:
+    #     model.max_seq_length = resized
     model.compile(mode="max-autotune", dynamic=False, fullgraph=True)
     return model
 
@@ -76,6 +79,7 @@ class Embedder:
     batch_size: int
     document_prefix: str
     query_prefix: str
+    chunk_size: int
 
     def __init__(
         self,
@@ -83,6 +87,7 @@ class Embedder:
         batch_size: int = 32,
         document_prefix: str = "",
         query_prefix: str = "",
+        chunk_size: int = TOKEN_CHUNKSIZE,
         **kwargs,
     ):
         torch.backends.cuda.preferred_rocm_fa_library("aotriton")
@@ -92,11 +97,14 @@ class Embedder:
         self.document_prefix = document_prefix
         self.query_prefix = query_prefix
 
-        if os.getenv("PYTORCH_TUNABLEOP_ENABLED", "0") == "1":
-            safe_name = model_name.replace("/", "_")
-            tuned_fname = f"tunableops_{safe_name}_{batch_size}.csv"
-            tunable.set_filename(tuned_fname)
-        self.model = create_model(model_name, **kwargs)
+        self.model = create_model(model_name, chunk_size, **kwargs)
+        max_chunk_size = self.model.max_seq_length * TOKEN_OVERHEAD_FACTOR
+        self.chunk_size = chunk_size
+        if chunk_size > max_chunk_size:
+            print(
+                f"Warning: chunk_size {chunk_size} is greater than the maximum allowed {max_chunk_size} for model {model_name}. Setting chunk_size to {int(max_chunk_size)}."
+            )
+            self.chunk_size = int(max_chunk_size)
 
     def encode_text(
         self,
@@ -105,16 +113,17 @@ class Embedder:
         show_progress: bool = False,
         embedding_type: EmbeddingType = EmbeddingType.GENERIC,
     ) -> list[SentenceEmbedding]:
-        prompt = ""
-        task = "retrieval"
+        kwargs = {}
         if embedding_type == EmbeddingType.QUERY:
-            prompt = self.query_prefix
-            task = "query"
+            if self.query_prefix:
+                kwargs["prompt"] = self.query_prefix
+            else:
+                kwargs["prompt_name"] = "query"
         elif embedding_type == EmbeddingType.DOCUMENT:
-            prompt = self.document_prefix
-            task = "document"
-        if prompt is None:
-            prompt = ""
+            if self.document_prefix:
+                kwargs["prompt"] = self.document_prefix
+            else:
+                kwargs["prompt_name"] = "document"
         with (
             torch.inference_mode(),
             sdpa_kernel(
@@ -134,8 +143,7 @@ class Embedder:
                     convert_to_tensor=True,
                     normalize_embeddings=True,
                     show_progress_bar=show_progress,
-                    prompt=prompt,
-                    task=task,
+                    **kwargs,
                 )
                 .half()
                 .cpu()
@@ -186,3 +194,6 @@ class Embedder:
 
     def get_tokenizer(self) -> PreTrainedTokenizerBase:
         return self.model.tokenizer
+
+    def set_batch_size(self, batch_size: int) -> None:
+        self.batch_size = batch_size

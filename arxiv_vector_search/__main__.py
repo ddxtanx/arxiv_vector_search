@@ -109,6 +109,7 @@ if __name__ == "__main__":
     embedding_batch_size = 0
     model_doc_prefix = ""
     model_query_prefix = ""
+    model_chunk_size = TOKEN_CHUNKSIZE
     if args.model not in model_names_in_db:
         embedding_batch_size = int(
             input(
@@ -121,6 +122,11 @@ if __name__ == "__main__":
         model_query_prefix = unescaped_input(
             "Enter a prefix to add to queries before embedding for this model (optional, can be left blank, and will be unescaped): "
         )
+        model_chunk_size_input = input(
+            f"Enter a chunk size for splitting documents for this model (optional, can be left blank for default {TOKEN_CHUNKSIZE}): "
+        )
+        if model_chunk_size_input.strip():
+            model_chunk_size = int(model_chunk_size_input)
     else:
         embedding_batch_size = next(
             model.batch_size for model in models if model.name == args.model
@@ -130,6 +136,7 @@ if __name__ == "__main__":
         embedding_batch_size,
         document_prefix=model_doc_prefix,
         query_prefix=model_query_prefix,
+        chunk_size=model_chunk_size,
     )
     if args.model not in model_names_in_db:
         db.add_model(embedder)
@@ -166,17 +173,8 @@ if __name__ == "__main__":
         downloader = DocumentDownloader()
         arxiv_downloader = ArxivDownloader()
         downloader.register_downloader(DocumentType.ARXIV, arxiv_downloader)
-        chunk_size = TOKEN_CHUNKSIZE
-        max_acceptable_chunk_size = int(
-            embedder.get_max_input_length() * TOKEN_OVERHEAD_FACTOR
-        )
-        if chunk_size > max_acceptable_chunk_size:
-            print(
-                f"Default chunk size of {chunk_size} is too large for the model's max input length of {embedder.get_max_input_length()}. Setting chunk size to {max_acceptable_chunk_size}."
-            )
-            chunk_size = max_acceptable_chunk_size
         splitter = DocumentSplitter(
-            chunk_size,
+            embedder.chunk_size,
             tokenizer=embedder.get_tokenizer(),
             prefix=embedder.document_prefix,
         )
@@ -294,6 +292,14 @@ if __name__ == "__main__":
             print(
                 f"URL: {url}, Min Distance: {min(scores[url]):.4f}, Pages: {sorted(pages[url])}"
             )
+
+        avg_results = db.query_embeddings_avg_by_doc(
+            embedder, query_embedding, top_k=10
+        )
+        print("\nTop 10 results sorted by average distance:")
+        for query_result in avg_results:
+            url = query_result.document.get_url()
+            print(f"URL: {url}, Avg Distance: {query_result.distance:.4f}")
 
         # top_10_by_avg = db.query_embeddings_avg(embedder, query_embedding, top_k=10)
         # print("\nTop 10 results sorted by average distance:")

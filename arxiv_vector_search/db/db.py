@@ -67,6 +67,7 @@ class Database:
                     embedding_dim=embedder.get_embedding_dim(),
                     document_prefix=embedder.document_prefix,
                     query_prefix=embedder.query_prefix,
+                    chunk_size=embedder.chunk_size,
                 )
                 .on_conflict_do_nothing(index_elements=["name"])
             )
@@ -242,8 +243,16 @@ class Database:
                 .where(EmbeddingMetadata.document_id == doc_id)
                 .values(state=EmbeddingState.MISSING)
             )
-            for table in self.model_to_embedding_table.values():
-                session.execute(delete(table).where(table.document_id == doc_id))
+            models = session.execute(select(Model)).scalars().all()
+
+            for model in models:
+                if model.name not in self.model_to_embedding_table:
+                    table = create_embedding_table(model.name, model.embedding_dim)
+                    self.model_to_embedding_table[model.name] = table
+                embedding_table = self.model_to_embedding_table.get(model.name)
+                session.execute(
+                    delete(embedding_table).where(embedding_table.document_id == doc_id)
+                )
             session.commit()
 
     def delete_embeddings_for_model(self, embedder: Embedder):
@@ -252,16 +261,22 @@ class Database:
                 select(Model).where(Model.name == embedder.get_model_name())
             ).scalar_one()
             model_id = model_record.id
+            print(f"Deleting embeddings for model {embedder.get_model_name()}...")
+            print("Marking embedding metadata as missing...")
             session.execute(
                 update(EmbeddingMetadata)
                 .where(EmbeddingMetadata.model_id == model_id)
                 .values(state=EmbeddingState.MISSING)
             )
+            if embedder.get_model_name() not in self.model_to_embedding_table:
+                self.create_embedding_table_for_model(embedder)
             embedding_table = self.model_to_embedding_table.get(
                 embedder.get_model_name()
             )
             if embedding_table:
-                session.execute(delete(embedding_table))
+                print("Dropping embedding table...")
+                embedding_table.__table__.drop(self.engine)
+                del self.model_to_embedding_table[embedder.get_model_name()]
             session.commit()
 
     def flush_errors_for_model(self, embedder: Embedder):
@@ -355,35 +370,7 @@ class Database:
                 )
             return query_results
 
-    def add_missing_doc_avgs_for_model(self, embedder: Embedder):
-        EmbeddingType = self.model_to_embedding_table.get(embedder.get_model_name())
-        with Session(self.engine) as session:
-            selected_alias = aliased(EmbeddingType, name="e1")
-            avg_col = avg(selected_alias.embedding).label("avg_embedding")
-            filter_alias = aliased(EmbeddingType, name="e2")
-            select_stmt = (
-                select(
-                    selected_alias.document_id,
-                    avg_col,
-                    literal(-1).label("chunk_index"),
-                    literal(0).label("page_index"),
-                )
-                .where(
-                    ~exists().where(
-                        (filter_alias.document_id == selected_alias.document_id)
-                        & (filter_alias.chunk_index == -1)
-                    )
-                )
-                .group_by(selected_alias.document_id)
-            )
-
-            insert_stmt = insert(EmbeddingType).from_select(
-                ["document_id", "embedding", "chunk_index", "page_index"], select_stmt
-            )
-            session.execute(insert_stmt)
-            session.commit()
-
-    def query_embeddings_avg(
+    def query_embeddings_avg_by_doc(
         self,
         embedder: Embedder,
         query_embedding: np.ndarray[tuple[int], np.dtype[np.float16]],
@@ -391,23 +378,23 @@ class Database:
     ) -> list[QueryResult]:
         if embedder.get_model_name() not in self.model_to_embedding_table:
             self.create_embedding_table_for_model(embedder)
-        self.add_missing_doc_avgs_for_model(embedder)
         EmbeddingType = self.model_to_embedding_table.get(embedder.get_model_name())
-        embedding_col = EmbeddingType.embedding.cosine_distance(query_embedding).label(
-            "distance"
-        )
+        distance_col = avg(
+            EmbeddingType.embedding.cosine_distance(query_embedding)
+        ).label("distance")
         with Session(self.engine) as session:
-            print("Querying database for similar document average embeddings...")
+            print("Querying database for similar embeddings...")
             results = session.execute(
-                select(EmbeddingType, Document, embedding_col)
-                .join(EmbeddingType.document)
-                .where(EmbeddingType.chunk_index == -1)
-                .order_by(embedding_col)
+                select(Document, distance_col)
+                .join(EmbeddingType, EmbeddingType.document_id == Document.id)
+                .where(EmbeddingType.chunk_index != -1)
+                .group_by(Document.id)
+                .order_by(distance_col)
                 .limit(top_k)
                 .execution_options(readonly=True)
             )
             query_results = []
-            for embedding, doc, distance in results:
+            for doc, distance in results:
                 document = None
                 if doc.pdf_type == DocumentType.ARXIV:
                     document = ArxivDocument(doc.identifier)
@@ -416,10 +403,6 @@ class Database:
                 elif doc.pdf_type == DocumentType.DOI:
                     document = DOIDocument(doc.identifier)
                 query_results.append(
-                    QueryResult(
-                        document=document,
-                        page_index=embedding.page_index,
-                        distance=distance,
-                    )
+                    QueryResult(document=document, page_index=-1, distance=distance)
                 )
             return query_results

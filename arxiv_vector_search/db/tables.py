@@ -1,5 +1,3 @@
-from sqlalchemy import VARCHAR
-from sqlalchemy import Text
 import enum
 from typing import List
 
@@ -26,6 +24,7 @@ class Model(Base):
     document_prefix: Mapped[str] = mapped_column(
         String(128), nullable=False, default=""
     )
+    chunk_size: Mapped[int] = mapped_column(SmallInteger, nullable=False)
 
 
 class Document(Base):

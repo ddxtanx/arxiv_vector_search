@@ -3,9 +3,10 @@ name = "arxiv_vector_search"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
-  "sentence-transformers==5.4.1",
+  "sentence-transformers",
   "torch",
   "triton-rocm",
+  "triton",
   "google-cloud-storage",
   "langchain-text-splitters",
   "SQLAlchemy",
@@ -13,12 +14,15 @@ dependencies = [
   "psycopg[binary,pool]",
   "pymupdf",
   "flash-attn",
+  "packaging",
+  "psutil",
+  "ninja",
+  "pip",
   "kagglehub[pandas-datasets]",
   "multiprocess",
   "dill",
-  "xformers",
-  "ninja",
   "packaging",
+  "bitsandbytes",
 ]
 
 [[tool.uv.index]]
@@ -26,21 +30,17 @@ name = "pytorch-rocm"
 url = "https://download.pytorch.org/whl/rocm7.2"
 explicit = true
 
-[tool.uv]
-no-build-isolation-package = ["flash-attn"]
-
-[tool.uv.extra-build-dependencies]
-flash-attn = ["setuptools", "psutil"]
-
 [tool.uv.sources]
 torch = { index = "pytorch-rocm" }
 triton-rocm = { index = "pytorch-rocm" }
-flash-attn = { git = "https://github.com/Dao-AILab/flash-attention/", tag = "v2.8.3" }
+triton = { index = "pytorch-rocm" }
+xformers = { index = "pytorch-rocm" }
+flash-attn = { git = "https://github.com/ROCm/flash-attention/" }
 
 [build-system]
-requires = ["uv_build>=0.11.7,<0.12"]
-build-backend = "uv_build"
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
-[tool.uv.build-backend]
-module-name = "arxiv_vector_search"
-module-root = ""
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["arxiv_vector_search*"]
