@@ -1,5 +1,4 @@
 import traceback
-import math
 from transformers import PreTrainedTokenizerBase
 from arxiv_vector_search.processors.splitter import SplitData
 from typing import TypeAlias
@@ -8,9 +7,8 @@ from typing import Any, TypedDict
 import torch
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from sentence_transformers import SentenceTransformer
-import os
-import torch.cuda.tunable as tunable
 from enum import Enum
+import copy
 
 SentenceEmbedding: TypeAlias = np.ndarray[tuple[int], np.dtype[np.float16]]
 
@@ -24,45 +22,66 @@ class EmbeddingType(Enum):
     GENERIC = "generic"
 
 
-def get_params() -> Any:
+def base_params() -> dict[str, Any]:
     base = {
-        "device": "cuda",
-        "model_kwargs": {
-            "dtype": torch.float16,
-            "attn_implementation": "flash_attention_2",
-        },
+        "device": torch.device("cuda"),
+        "model_kwargs": {"dtype": torch.bfloat16, "torch_dtype": "auto"},
         "processor_kwargs": {
             "use_fast": True,
         },
         "config_kwargs": {
-            "dtype": torch.float16,
+            "dtype": torch.bfloat16,
             "use_memory_efficient_attention": True,
-            "_attn_implementation": "flash_attention_2",
-            "unpad_inputs": True,
         },
         "trust_remote_code": True,
     }
     return base
 
 
+def get_params() -> list[dict[str, Any]]:
+    base = base_params()
+    with_flash_attention_both = copy.deepcopy(base)
+    with_flash_attention_both["model_kwargs"]["attn_implementation"] = (
+        "flash_attention_2"
+    )
+    with_flash_attention_both["config_kwargs"]["_attn_implementation"] = (
+        "flash_attention_2"
+    )
+    with_flash_attention_both["config_kwargs"]["unpad_inputs"] = True
+    with_flash_attention_config_only = copy.deepcopy(base)
+    with_flash_attention_config_only["config_kwargs"]["_attn_implementation"] = (
+        "flash_attention_2"
+    )
+    with_flash_attention_config_only["config_kwargs"]["unpad_inputs"] = True
+    with_sdpa = copy.deepcopy(base)
+    with_sdpa["model_kwargs"]["attn_implementation"] = "sdpa"
+    with_sdpa["config_kwargs"]["_attn_implementation"] = "sdpa"
+    return [with_flash_attention_both, with_flash_attention_config_only, with_sdpa]
+
+
 def create_model(model_name: str, chunk_size: int, **kwargs) -> SentenceTransformer:
     params = get_params()
-    params.update(kwargs)
-    try:
-        model = SentenceTransformer(model_name, **params)
-    except ValueError as e:
-        traceback.print_exception(e)
-        params["model_kwargs"]["attn_implementation"] = "sdpa"
-        params["config_kwargs"]["_attn_implementation"] = "sdpa"
-        del params["config_kwargs"]["unpad_inputs"]
-        model = SentenceTransformer(model_name, **params)
+    model = None
+    for param_set in params:
+        if "jinaai" in model_name.lower():
+            param_set["model_kwargs"]["default_task"] = "retrieval"
+        try:
+            param_set = param_set.update(kwargs) or param_set
+            model = SentenceTransformer(model_name, **param_set)
+            break
+        except ValueError as e:
+            traceback.print_exception(e)
+    if model is None:
+        raise ValueError(
+            f"Failed to load model {model_name} with any of the parameter sets."
+        )
     model.eval()
     model.to("cuda").half()
     # cur_seq_len = model.max_seq_length
     # resized = math.ceil(chunk_size / TOKEN_OVERHEAD_FACTOR)
     # if resized < cur_seq_len:
     #     model.max_seq_length = resized
-    model.compile(mode="max-autotune", dynamic=False, fullgraph=True)
+    model.compile(mode="max-autotune", dynamic=True, fullgraph=True)
     return model
 
 
@@ -91,7 +110,6 @@ class Embedder:
         **kwargs,
     ):
         torch.backends.cuda.preferred_rocm_fa_library("aotriton")
-        torch.cuda.set_per_process_memory_fraction(0.95)
         self.model_name = model_name
         self.batch_size = batch_size
         self.document_prefix = document_prefix
@@ -149,7 +167,6 @@ class Embedder:
                 .cpu()
                 .numpy()
             )
-        torch.cuda.empty_cache()
         return embeddings
 
     def embed_documents(
@@ -184,7 +201,7 @@ class Embedder:
         return self.model_name
 
     def get_embedding_dim(self) -> int:
-        return self.model.get_embedding_dimension()
+        return self.model.encode("test").shape[0]
 
     def get_batch_size(self) -> int:
         return self.batch_size

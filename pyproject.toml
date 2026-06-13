@@ -4,9 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
   "sentence-transformers",
-  "torch",
-  "triton-rocm",
-  "triton",
+  "torch[device-gfx1201]",
   "google-cloud-storage",
   "langchain-text-splitters",
   "SQLAlchemy",
@@ -23,19 +21,19 @@ dependencies = [
   "dill",
   "packaging",
   "bitsandbytes",
+  "peft",
 ]
 
 [[tool.uv.index]]
 name = "pytorch-rocm"
-url = "https://download.pytorch.org/whl/rocm7.2"
+url = "https://rocm.nightlies.amd.com/whl-multi-arch/"
 explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-rocm" }
-triton-rocm = { index = "pytorch-rocm" }
 triton = { index = "pytorch-rocm" }
 xformers = { index = "pytorch-rocm" }
-flash-attn = { git = "https://github.com/ROCm/flash-attention/" }
+flash-attn = { git = "https://github.com/Dao-AILab/flash-attention/" }
 
 [build-system]
 requires = ["setuptools>=61.0.0", "wheel"]

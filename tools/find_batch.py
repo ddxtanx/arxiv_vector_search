@@ -111,13 +111,22 @@ if __name__ == "__main__":
             "chunk_size": chunk_size,
             "batch_size": 32,
         }
-    default_model = Embedder(
-        model.name,
-        model.batch_size,
-        model.document_prefix,
-        model.query_prefix,
-        model.chunk_size,
-    )
+    if isinstance(model, dict):
+        default_model = Embedder(
+            model["name"],
+            model["batch_size"],
+            model["document_prefix"],
+            model["query_prefix"],
+            model["chunk_size"],
+        )
+    else:
+        default_model = Embedder(
+            model.name,
+            model.batch_size,
+            model.document_prefix,
+            model.query_prefix,
+            model.chunk_size,
+        )
     default_model.encode_text(["Test encoding to initialize model and tokenizer."], 1)
 
     docs = db.get_documents()
