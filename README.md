@@ -83,3 +83,29 @@ Modern Type1 fonts):
 - Chunks shorter than 128 chars are dropped (`DEFAULT_MIN_CHUNK_CHARS`).
 - Embedding inserts are `ON CONFLICT DO NOTHING`, so re-processing a
   document after a crash mid-batch is safe.
+- A 6th cleanup pass scrubs control characters (legacy CM-font arXiv
+  files emit them from every extractor).
+
+## Experimental: Rust split engine (`--split_engine rust`)
+
+`rust/fastsplit/` is a rayon-parallel extract+split binary (pdf_oxide + a
+byte-for-byte port of this repo's exact langchain chunking semantics,
+verified by `tools/validate_fastsplit.py`). Build with
+`cargo build --release --manifest-path rust/fastsplit/Cargo.toml`, then:
+
+```bash
+python -m arxiv_vector_search --embed --split_engine rust
+```
+
+Measured on 66 mixed papers (this machine's sandbox, 24 threads vs the
+Python forkserver pool): extract+split 2.4 s vs 5.3 s (w=10) / 3.1 s
+(w=24) / 22 s sequential — ~2-3x faster end-to-end for the stage, with
+scaling 14.6 s single-thread -> 1.4 s at 24 threads. Caveats: the
+extractor differs from MuPDF (chunk text differs slightly at the same
+chunk boundaries for identical input text — never mix engines within one
+model's rows), and chunking is character-based only (no tokenizer path).
+
+The full-pipeline context: extraction+splitting was measured at <1% of
+stage cost for the *split* part itself and the whole stage remains dwarfed
+by embedding throughput, so this is an optional accelerator, not a reason
+to port the rest.

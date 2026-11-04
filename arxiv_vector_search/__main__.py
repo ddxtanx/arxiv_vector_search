@@ -109,6 +109,19 @@ if __name__ == "__main__":
         ),
     )
 
+    _ = parser.add_argument(
+        "--split_engine",
+        type=str,
+        choices=["python", "rust"],
+        default="python",
+        help=(
+            "Document splitting engine. 'rust' uses the rayon-parallel "
+            "fastsplit binary (rust/fastsplit; ~2-3x faster on the extract+"
+            "split stage, character-based chunking only — build the binary "
+            "first). 'python' is the default MuPDF/langchain path."
+        ),
+    )
+
     args: Args = parser.parse_args()
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
@@ -223,11 +236,21 @@ if __name__ == "__main__":
         downloader = DocumentDownloader()
         arxiv_downloader = ArxivDownloader()
         downloader.register_downloader(DocumentType.ARXIV, arxiv_downloader)
-        splitter = DocumentSplitter(
-            embedder.chunk_size,
-            tokenizer=embedder.get_tokenizer(),
-            prefix=embedder.document_prefix,
-        )
+        if args.split_engine == "rust":
+            from arxiv_vector_search.processors.rust_splitter import RustSplitEngine
+
+            if embedder.get_tokenizer() is not None:
+                print(
+                    "Warning: the rust split engine chunks by characters only; "
+                    "a tokenizer is configured but will not be used for chunk sizing."
+                )
+            splitter = RustSplitEngine(chunk_size=embedder.chunk_size)
+        else:
+            splitter = DocumentSplitter(
+                embedder.chunk_size,
+                tokenizer=embedder.get_tokenizer(),
+                prefix=embedder.document_prefix,
+            )
         while True:
             batch = db.get_missing_embeddings_for_model(
                 embedder, limit=args.batch_size, offset=0

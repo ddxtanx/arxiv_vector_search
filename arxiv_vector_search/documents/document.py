@@ -8,6 +8,10 @@ _MID_WORD_BREAK = re.compile(r"(?<=[a-z])\n(?=[a-z])")
 _PAGE_NUMBER = re.compile(r"\n\s*\d{1,3}\s*\n")
 _EXCESS_WHITESPACE = re.compile(r"[ \t]{2,}")
 _SYMBOL_LINE = re.compile(r"\n[^\w\s]{3,}\n")
+# Legacy (pre-2007) arXiv CM Type1 fonts make pdfium/pdf_oxide map 'c' to
+# control chars (\r etc). MuPDF emits other control junk. Control characters
+# are pure noise for embeddings, so scrub them in every engine's output.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 regex_pass = [
     (_DEHYPHENATE, r"\1"),
@@ -15,6 +19,7 @@ regex_pass = [
     (_PAGE_NUMBER, "\n"),
     (_EXCESS_WHITESPACE, " "),
     (_SYMBOL_LINE, "\n"),
+    (_CONTROL, " "),
 ]
 
 pymupdf.TOOLS.mupdf_display_errors(False)
