@@ -30,11 +30,19 @@ class QueryResult:
     document: PdfDocument
     page_index: int
     distance: float
+    text: str | None
 
-    def __init__(self, document: PdfDocument, page_index: int, distance: float):
+    def __init__(
+        self,
+        document: PdfDocument,
+        page_index: int,
+        distance: float,
+        text: str | None = None,
+    ):
         self.document = document
         self.page_index = page_index
         self.distance = distance
+        self.text = text
 
     def get_url(self) -> str:
         return self.document.get_url()
@@ -138,6 +146,15 @@ class Database:
             embedder.get_model_name(), embedder.get_embedding_dim()
         )
         Base.metadata.create_all(self.engine)
+        # Idempotent migration for tables created before the chunk-text column
+        # existed (reranking needs stored text; old rows stay NULL until
+        # re-embedded).
+        table_name = table.__tablename__
+        with self.engine.connect() as conn:
+            conn.execute(
+                text(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS "text" TEXT')
+            )
+            conn.commit()
         self.model_to_embedding_table[embedder.get_model_name()] = table
 
     def get_models(self) -> list[Model]:
@@ -354,7 +371,7 @@ class Database:
                 text(f"SET LOCAL hnsw.ef_search = {max(100, int(top_k) * 2)}")
             )
             results = session.execute(
-                select(EmbeddingType, Document, embedding_col)
+                select(EmbeddingType, Document, embedding_col, EmbeddingType.text)
                 .join(EmbeddingType.document)
                 .where(EmbeddingType.chunk_index != -1)
                 .order_by(embedding_col)
@@ -362,7 +379,7 @@ class Database:
                 .execution_options(readonly=True)
             )
             query_results = []
-            for embedding, doc, distance in results:
+            for embedding, doc, distance, chunk_text in results:
                 document = None
                 if doc.pdf_type == DocumentType.ARXIV:
                     document = ArxivDocument(doc.identifier)
@@ -375,6 +392,7 @@ class Database:
                         document=document,
                         page_index=embedding.page_index,
                         distance=distance,
+                        text=chunk_text,
                     )
                 )
             return query_results

@@ -33,6 +33,8 @@ class Args:
     embedding_url: str
     embedding_api_key: str
     concurrency: int
+    rerank_model: str
+    rerank_candidates: int
 
 
 def unescaped_input(prompt: str) -> str:
@@ -107,6 +109,25 @@ if __name__ == "__main__":
             "(EMBED_CONCURRENCY, default 4). Keep low if the server also "
             "serves interactive traffic."
         ),
+    )
+
+    _ = parser.add_argument(
+        "--rerank_model",
+        type=str,
+        default=os.getenv("RERANK_MODEL"),
+        help=(
+            "Reranker model id served by the same llama-swap router (e.g. "
+            "QwenReranking). When set, --query re-scores the vector-search "
+            "candidates with the cross-encoder. Needs chunk text stored "
+            "(rows embedded with the current schema). RERANK_MODEL env also "
+            "works."
+        ),
+    )
+    _ = parser.add_argument(
+        "--rerank_candidates",
+        type=int,
+        default=50,
+        help="Number of vector-search candidates sent to the reranker (default 50).",
     )
 
     _ = parser.add_argument(
@@ -340,6 +361,34 @@ if __name__ == "__main__":
     if args.query:
         query_embedding = embedder.embed_queries([args.query])[0]
         print("Query embedding generated. Performing vector search...")
+        reranker = None
+        if args.rerank_model:
+            from arxiv_vector_search.processors.reranker import RemoteReranker
+
+            reranker = RemoteReranker(
+                args.rerank_model, base_url=args.embedding_url, api_key=args.embedding_api_key
+            )
+        if reranker is not None:
+            candidates = db.query_embeddings(
+                embedder, query_embedding, top_k=args.rerank_candidates
+            )
+            with_text = [r for r in candidates if r.text]
+            if not with_text:
+                print(
+                    "Reranking requested but no stored chunk text is available "
+                    "(rows predate the text column). Falling back to vector-only "
+                    "results; re-embed to populate chunk text."
+                )
+            else:
+                order = reranker.rerank(args.query, [r.text for r in with_text])
+                print(
+                    f"\nTop {min(10, len(order))} results after reranking {len(with_text)} candidates:"
+                )
+                for rank, (ci, score) in enumerate(order[:10], start=1):
+                    r = with_text[ci]
+                    print(
+                        f"{rank:2d}. {r.get_url()} p{r.page_index} rerank={score:.4f} vec_dist={r.distance:.4f}"
+                    )
         results = db.query_embeddings(embedder, query_embedding, top_k=1000)
         print(
             f"Retrieved {len(results)} results. Processing and displaying top results..."

@@ -103,6 +103,7 @@ class Embedding(TypedDict):
     page_index: int
     chunk_index: int
     embedding: SentenceEmbedding
+    text: str
 
 
 class Embedder:
@@ -206,6 +207,7 @@ class Embedder:
                 "page_index": split.page_index,
                 "chunk_index": split.chunk_index,
                 "embedding": embedding,
+                "text": split.text,
             }
             for split, embedding in zip(splits, embeddings)
         ]
