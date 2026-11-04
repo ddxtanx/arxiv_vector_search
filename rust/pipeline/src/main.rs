@@ -104,8 +104,7 @@ fn main() {
                 for (i, name) in models.iter().enumerate() {
                     println!("{i}: {name}");
                 }
-                let answer =
-                    prompt("Enter the number corresponding to the model, or its name: ");
+                let answer = prompt("Enter the number corresponding to the model, or its name: ");
                 if answer.parse::<usize>().is_ok()
                     && answer.parse::<usize>().unwrap() < models.len()
                 {
@@ -120,12 +119,16 @@ fn main() {
     let embedder = match RemoteEmbedder::new(
         &model_name,
         &base_url,
-        cli.embedding_api_key.clone().or_else(|| std::env::var("EMBEDDING_API_KEY").ok()),
-        cli.concurrency.or_else(|| {
-            std::env::var("EMBED_CONCURRENCY")
-                .ok()
-                .and_then(|v| v.parse().ok())
-        }).unwrap_or(4),
+        cli.embedding_api_key
+            .clone()
+            .or_else(|| std::env::var("EMBEDDING_API_KEY").ok()),
+        cli.concurrency
+            .or_else(|| {
+                std::env::var("EMBED_CONCURRENCY")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(4),
     ) {
         Ok(e) => e,
         Err(e) => {
@@ -138,7 +141,9 @@ fn main() {
         embedder.embedding_dim, embedder.max_input_length, embedder.supports_batch_input
     );
 
-    let chunk_overlap = cli.chunk_overlap.unwrap_or((cli.chunk_size as f64 * 0.15) as i32);
+    let chunk_overlap = cli
+        .chunk_overlap
+        .unwrap_or((cli.chunk_size as f64 * 0.15) as i32);
     db.get_or_create_model(
         &model_name,
         embedder.embedding_dim as i32,
@@ -202,16 +207,20 @@ fn main() {
 
 fn run_embed(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli) {
     let dl = Downloader::new(&cli.dl_path);
+    db.add_missing_states().expect("add_missing_states");
+    for (state, n) in db.state_counts().unwrap_or_default() {
+        println!("state {state}: {n}");
+    }
+    let batch_size = db.model().batch_size.max(1) as usize;
+    let chunk_size = db.model().chunk_size;
+    let chunk_overlap_tokens = db.model().chunk_overlap;
     let params = fastsplit::Params {
-        chunk_size: (cli.chunk_size as f64 * CHUNK_CHAR_FACTOR) as usize,
-        chunk_overlap: (cli.chunk_overlap.unwrap_or((cli.chunk_size as f64 * 0.15) as i32)
-            as f64
-            * CHUNK_CHAR_FACTOR) as usize,
+        chunk_size: (chunk_size as f64 * CHUNK_CHAR_FACTOR) as usize,
+        chunk_overlap: (chunk_overlap_tokens as f64 * CHUNK_CHAR_FACTOR) as usize,
         min_chunk_chars: MIN_CHUNK_CHARS,
     };
-
     loop {
-        let batch = db.get_missing(cli.batch_size as i64).expect("get_missing");
+        let batch = db.get_missing(batch_size as i64).expect("get_missing");
         if batch.is_empty() {
             break;
         }
@@ -248,7 +257,7 @@ fn run_embed(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli) {
         // Optimization: prefetch the NEXT batch's downloads while we split +
         // embed this one (skip_existing makes the sync pass instant after).
         {
-            let next = db.get_missing(cli.batch_size as i64).unwrap_or_default();
+            let next = db.get_missing(batch_size as i64).unwrap_or_default();
             if !next.is_empty() {
                 let dl2 = Downloader::new(&cli.dl_path);
                 thread::spawn(move || {
@@ -273,12 +282,7 @@ fn run_embed(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli) {
                         split_errs.push((ident.clone(), "no chunks produced".to_string()));
                     }
                     for c in cs {
-                        chunks.push((
-                            ident.clone(),
-                            c.page_index,
-                            c.chunk_index as i32,
-                            c.text,
-                        ));
+                        chunks.push((ident.clone(), c.page_index, c.chunk_index as i32, c.text));
                     }
                 }
                 Err(e) => split_errs.push((ident, e)),
@@ -293,7 +297,10 @@ fn run_embed(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli) {
         if !split_errs.is_empty() {
             let first_msg = split_errs[0].1.clone();
             db.set_states(
-                &split_errs.iter().map(|(i, _)| i.clone()).collect::<Vec<_>>(),
+                &split_errs
+                    .iter()
+                    .map(|(i, _)| i.clone())
+                    .collect::<Vec<_>>(),
                 State::SplitError,
                 Some(&first_msg),
             )
@@ -319,7 +326,8 @@ fn run_embed(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli) {
             .zip(vectors)
             .map(|((ident, page, chunk_i, text), vec)| (ident, page, chunk_i, vec, text))
             .collect();
-        db.add_embeddings(&ident_map, &rows).expect("add_embeddings");
+        db.add_embeddings(&ident_map, &rows)
+            .expect("add_embeddings");
         let good_docs: Vec<String> = {
             let mut seen = std::collections::HashSet::new();
             rows.iter()
@@ -360,7 +368,9 @@ fn run_query(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli, q: &str) {
         let reranker = RemoteReranker::new(
             &rmodel,
             cli.embedding_url.as_deref(),
-            cli.embedding_api_key.clone().or_else(|| std::env::var("EMBEDDING_API_KEY").ok()),
+            cli.embedding_api_key
+                .clone()
+                .or_else(|| std::env::var("EMBEDDING_API_KEY").ok()),
         );
         let candidates = db
             .query_embeddings(&qvec, cli.rerank_candidates as i64)
@@ -378,7 +388,11 @@ fn run_query(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli, q: &str) {
                     println!(
                         "{:>2}. {} p{} rerank={:.4} vec_dist={:.4}",
                         rank + 1,
-                        Document { identifier: ident.clone(), pdf_type: DocumentType::Arxiv }.url(),
+                        Document {
+                            identifier: ident.clone(),
+                            pdf_type: DocumentType::Arxiv
+                        }
+                        .url(),
                         page,
                         score,
                         dist
@@ -401,7 +415,7 @@ fn run_query(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli, q: &str) {
     }
     let mut ranked: Vec<(&String, (f64, Vec<i32>))> =
         by_ident.iter().map(|(k, v)| (k, v.clone())).collect();
-    ranked.sort_by(|a, b| a.1.0.total_cmp(&b.1.0));
+    ranked.sort_by(|a, b| a.1 .0.total_cmp(&b.1 .0));
     println!("\nTop 10 results sorted by minimum distance:");
     for (ident, (dist, pages)) in ranked.iter().take(10) {
         let mut pages = pages.clone();
@@ -409,7 +423,11 @@ fn run_query(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli, q: &str) {
         pages.dedup();
         println!(
             "URL: {}, Min Distance: {dist:.4}, Pages: {pages:?}",
-            Document { identifier: ident.to_string(), pdf_type: DocumentType::Arxiv }.url()
+            Document {
+                identifier: ident.to_string(),
+                pdf_type: DocumentType::Arxiv
+            }
+            .url()
         );
     }
     let avg = db.query_avg_by_doc(&qvec, 10).expect("avg query");
@@ -417,7 +435,11 @@ fn run_query(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli, q: &str) {
     for (ident, t, dist) in avg {
         println!(
             "URL: {}, Avg Distance: {dist:.4}",
-            Document { identifier: ident, pdf_type: t }.url()
+            Document {
+                identifier: ident,
+                pdf_type: t
+            }
+            .url()
         );
     }
 }

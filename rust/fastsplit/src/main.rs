@@ -3,7 +3,7 @@
 //! Split-only mode (parity testing): JSONL {"identifier","text"} on stdin.
 //! NDJSON one object per chunk on stdout; timing on stderr.
 
-use fastsplit::{Chunk, Params, chunk_text, extract_documents_parallel};
+use fastsplit::{chunk_text, extract_documents_parallel, Chunk, Params};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::process;
@@ -83,21 +83,25 @@ fn main() {
         }
     } else {
         let stdin = io::stdin();
-        let docs: Vec<(String, String)> = stdin
-            .lock()
-            .lines()
-            .filter_map(|l| l.ok())
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| {
-                let v: Value = serde_json::from_str(&l).ok()?;
-                Some((
-                    v["identifier"].as_str()?.to_string(),
-                    v["text"].as_str()?.to_string(),
-                ))
-            })
-            .collect();
+        let mut docs: Vec<(String, String)> = Vec::new();
+        for line in stdin.lock().lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let v: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let (Some(id), Some(t)) = (v["identifier"].as_str(), v["text"].as_str()) {
+                docs.push((id.to_string(), t.to_string()));
+            }
+        }
         for (id, text) in &docs {
-            let chunks = chunk_text(id, text, &p);
+            let chunks = chunk_text(text, &p);
             nchunks += chunks.len();
             emit(id, &chunks, &mut out);
         }

@@ -18,6 +18,9 @@ use pgvector::HalfVector;
 use postgres::{Client, NoTls};
 use std::collections::HashMap;
 
+/// (identifier, pdf_type, page_index, cosine_distance, chunk_text)
+pub type QueryHit = (String, DocumentType, i32, f64, String);
+
 pub struct ModelRow {
     pub id: i32,
     pub name: String,
@@ -93,6 +96,7 @@ impl Db {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Insert-or-load the model row. Existing rows win on params (the
     /// stored settings define the vector space); mismatches warn loudly.
     pub fn existing_model_names(&mut self) -> Vec<String> {
@@ -104,6 +108,7 @@ impl Db {
             .collect::<Vec<String>>()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn get_or_create_model(
         &mut self,
         name: &str,
@@ -120,8 +125,16 @@ impl Db {
                 "INSERT INTO models (name, embedding_dim, batch_size, chunk_size, chunk_overlap,
                                      document_prefix, query_prefix, base_url)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (name) DO NOTHING",
-                &[&name, &embedding_dim, &batch_size, &chunk_size, &chunk_overlap,
-                  &document_prefix, &query_prefix, &base_url],
+                &[
+                    &name,
+                    &embedding_dim,
+                    &batch_size,
+                    &chunk_size,
+                    &chunk_overlap,
+                    &document_prefix,
+                    &query_prefix,
+                    &base_url,
+                ],
             )
             .map_err(|e| format!("model insert: {e}"))?;
         let row = self
@@ -200,16 +213,6 @@ impl Db {
             tx.commit().map_err(|e| e.to_string())?;
         }
         Ok(())
-    }
-
-    pub fn doc_id(&mut self, identifier: &str) -> Result<Option<i64>, String> {
-        self.client
-            .query_opt(
-                "SELECT id FROM documents WHERE identifier = $1",
-                &[&identifier],
-            )
-            .map(|r| r.map(|r| r.get("id")))
-            .map_err(|e| e.to_string())
     }
 
     /// Create 'missing' state rows for documents of this model that have none.
@@ -297,7 +300,7 @@ impl Db {
                     Some(id) => *id,
                     None => continue,
                 };
-                let v = HalfVector::from_f32_slice(&vec);
+                let v = HalfVector::from_f32_slice(vec);
                 tx.execute(
                     &format!(
                         "INSERT INTO {table} (document_id, page_index, chunk_index, embedding, text)
@@ -312,11 +315,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn query_embeddings(
-        &mut self,
-        query: &[f32],
-        top_k: i64,
-    ) -> Result<Vec<(String, DocumentType, i32, f64, String)>, String> {
+    pub fn query_embeddings(&mut self, query: &[f32], top_k: i64) -> Result<Vec<QueryHit>, String> {
         let table = embeddings_table(&self.model().name);
         let q = HalfVector::from_f32_slice(query);
         let ef = (top_k as usize * 2).max(100);
@@ -375,7 +374,13 @@ impl Db {
         tx.commit().map_err(|e| e.to_string())?;
         Ok(rows
             .iter()
-            .map(|r| (r.get("identifier"), DocumentType::from_db_name(r.get("pdf_type")), r.get("distance")))
+            .map(|r| {
+                (
+                    r.get("identifier"),
+                    DocumentType::from_db_name(r.get("pdf_type")),
+                    r.get("distance"),
+                )
+            })
             .collect())
     }
 

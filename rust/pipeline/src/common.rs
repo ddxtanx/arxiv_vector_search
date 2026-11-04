@@ -69,6 +69,8 @@ impl Document {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
+    /// Row-creation default is written in SQL, but kept for completeness.
+    #[allow(dead_code)]
     Missing,
     DownloadError,
     SplitError,

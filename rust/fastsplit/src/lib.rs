@@ -7,7 +7,6 @@
 //! Split-only mode (parity testing): JSONL {"identifier","text"} on stdin.
 //! Output: one NDJSON object per chunk, then a summary line.
 
-
 const SEPARATORS: &[&str] = &[
     "\n\n\n", "\n\n", ". \n", ".\n", ". ", "? ", "! ", "; ", "\n", " ", "",
 ];
@@ -78,7 +77,7 @@ fn merge_splits(splits: &[String], sep: &str, p: &Params) -> Vec<String> {
                     docs.push(doc);
                 }
                 while total > p.chunk_overlap
-                    || (total + len_ + if current_doc.len() > 0 { sep_len } else { 0 }
+                    || (total + len_ + if !current_doc.is_empty() { sep_len } else { 0 }
                         > p.chunk_size
                         && total > 0)
                 {
@@ -316,7 +315,7 @@ fn regex_passes(page: Vec<char>) -> Vec<char> {
             while j < out.len() && !is_w(out[j]) && !out[j].is_whitespace() {
                 j += 1;
             }
-            if j - i - 1 >= 3 && j < out.len() && out[j] == '\n' {
+            if j - i > 3 && j < out.len() && out[j] == '\n' {
                 r.push('\n');
                 i = j + 1;
                 continue;
@@ -330,9 +329,7 @@ fn regex_passes(page: Vec<char>) -> Vec<char> {
     // (legacy CM Type1 fonts make pdfium/pdf_oxide emit \r where 'c' belongs;
     // control chars are embedding noise). Mirrors _CONTROL in document.py.
     for c in out.iter_mut() {
-        if (*c as u32) < 0x20 && *c != '\n' && *c != '\t' {
-            *c = ' ';
-        } else if *c == '\x7f' {
+        if ((*c as u32) < 0x20 && *c != '\n' && *c != '\t') || *c == '\x7f' {
             *c = ' ';
         }
     }
@@ -346,7 +343,7 @@ fn text_to_pages(full_text: String) -> (Vec<usize>, Vec<char>) {
     (vec![chars.len()], chars)
 }
 
-pub fn extract_document(identifier: &str, path: &str, p: &Params) -> Result<Vec<Chunk>, String> {
+pub fn extract_document(path: &str, p: &Params) -> Result<Vec<Chunk>, String> {
     let doc = match pdf_oxide::document::PdfDocument::open(path) {
         Ok(d) => d,
         Err(e) => {
@@ -397,7 +394,7 @@ pub fn extract_document(identifier: &str, path: &str, p: &Params) -> Result<Vec<
 }
 
 /// Chunk an already-extracted document text (page mapping = single page).
-pub fn chunk_text(_identifier: &str, full_text: &str, p: &Params) -> Vec<Chunk> {
+pub fn chunk_text(full_text: &str, p: &Params) -> Vec<Chunk> {
     let (lens, chars) = text_to_pages(full_text.to_string());
     make_chunks(chars, &lens, p)
 }
@@ -408,7 +405,7 @@ pub fn extract_documents_parallel(
     p: &Params,
     threads: usize,
 ) -> Vec<(String, Result<Vec<Chunk>, String>)> {
-        use rayon::prelude::*;
+    use rayon::prelude::*;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads.max(1))
         .build()
@@ -416,7 +413,7 @@ pub fn extract_documents_parallel(
     pool.install(|| {
         files
             .par_iter()
-            .map(|(id, path)| (id.clone(), extract_document(id, path, p)))
+            .map(|(id, path)| (id.clone(), extract_document(path, p)))
             .collect()
     })
 }

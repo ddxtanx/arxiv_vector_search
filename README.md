@@ -74,6 +74,67 @@ Modern Type1 fonts):
   MuPDF with parity fidelity and a nice header/footer-artifact API —
   worth watching, and it is the extractor a Rust port would use.
 
+## Rust pipeline (`rust/`) — full rewrite
+
+`rust/pipeline/` is a complete Rust rewrite of the pipeline (ingest, embed,
+query, rerank) in a single binary. `rust/fastsplit/` is its extract+chunk
+library (also usable standalone).
+
+Build:
+```bash
+cd rust && cargo build --release        # binary: rust/target/release/pipeline
+```
+
+Usage mirrors the Python CLI:
+```bash
+DATABASE_URL=... EMBEDDING_BASE_URL=http://127.0.0.1:8194 \
+./rust/target/release/pipeline --update_arxiv_metadata   # seed doc list (needs Kaggle creds)
+./rust/target/release/pipeline --embed --model QwenEmbedding --batch_size 200
+RERANK_MODEL=QwenReranking ./rust/target/release/pipeline --query "motives in Shimura varieties"
+```
+Env vars: `DATABASE_URL`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`,
+`EMBED_CONCURRENCY`, `RERANK_MODEL`, `RERANK_BASE_URL`, `KAGGLE_USERNAME`/
+`KAGGLE_KEY` (or `~/.kaggle/access_token`).
+
+### New schema (the old DB was wiped; no migration)
+- `documents(id bigserial, identifier text unique, pdf_type text)`
+- `models(id, name, embedding_dim, batch_size, chunk_size, chunk_overlap,
+  document_prefix, query_prefix, base_url)`
+- `doc_states(document_id, model_id, state, error_message, updated_at)` with
+  **PRIMARY KEY (document_id, model_id)** — the Python layer allowed
+  duplicate state rows; failures now keep their `error_message`.
+- `embeddings_<model>(document_id, page_index, chunk_index, embedding
+  halfvec, text)` — text is **NOT NULL** (reranking is a first-class
+  feature); table is created **with its HNSW cosine index** (no separate
+  indexing tool); FKs use `ON DELETE CASCADE`.
+- state values are lowercase (`missing`, `download_error`, `split_error`,
+  `embedded`) instead of SQLAlchemy enum names.
+
+### Optimizations vs the Python pipeline (each defensible, each testable)
+- **Server-side embedding batches**: probes whether llama.cpp accepts
+  `input` as an array; sends whole batches in one request when supported
+  (Python: one request per chunk).
+- **Prefetched downloads**: while batch N is being split/embedded, batch
+  N+1's PDFs download on a background thread (skip-existing makes the
+  sync pass instant). Downloads hit the public bucket over anonymous
+  HTTPS — no google-cloud SDK, no credentials.
+- **SET LOCAL hnsw.ef_search runs inside a transaction** — in the Python
+  layer it was a silent no-op outside autocommit (real recall bug).
+- Multi-row transactional inserts (500/txn), rayon extract+split
+  (byte-parity with langchunking proven by `tools/validate_fastsplit.py`),
+  retry/backoff on GCS and embedding transport, stored error messages for
+  failed docs (`--flush_errors` re-queues them).
+
+### Verification status
+- Unit/integration: chunker parity (2,942 chunks / 0 mismatches), embedder
+  + reranker + downloader + metadata tests via mock servers and live GCS
+  downloads (`cargo test` in `rust/`).
+- End-to-end on real Postgres+pgvector + llama-swap: run on the host (the
+  dev sandbox has no Postgres server). Suggested smoke test:
+  `--embed --batch_size 20` against the llama-swap router (seed a handful
+  of documents with a one-off `INSERT INTO documents ...`), then
+  `--query`.
+
 ## Notes
 
 - Chunk sizing: `chunk_size` tokens for the model's tokenizer (or
