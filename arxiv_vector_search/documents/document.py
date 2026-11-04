@@ -64,7 +64,13 @@ class DownloadedDocument(Document):
     def get_pages_text(self) -> list[str] | ReadError:
         try:
             with pymupdf.open(self.path) as doc:
-                return [str(page.get_text()) for page in doc]
+                # sort=True reorders text blocks into reading order. On
+                # legacy (pre-2007) arXiv files with custom-encoded Computer
+                # Modern Type1 fonts, the default block order comes out
+                # word-per-line garbage and drops characters; sorting fixes
+                # it. It costs ~7x extraction time, which is still <1% of
+                # embedding cost.
+                return [str(page.get_text(sort=True)) for page in doc]
         except Exception as e:
             return ReadError(self.identifier, str(e))
 

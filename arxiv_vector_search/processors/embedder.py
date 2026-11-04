@@ -1,14 +1,27 @@
 import traceback
-from transformers import PreTrainedTokenizerBase
 from arxiv_vector_search.processors.splitter import SplitData
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 import numpy as np
 from typing import Any, TypedDict
-import torch
-from torch.nn.attention import sdpa_kernel, SDPBackend
-from sentence_transformers import SentenceTransformer
 from enum import Enum
 import copy
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
+
+# torch + sentence-transformers are OPTIONAL (install the "local" extra).
+# The remote llama.cpp embedder (processors.llama_cpp_embedder) runs without
+# either, so keep these imports lazy/guarded.
+try:
+    import torch
+    from torch.nn.attention import sdpa_kernel, SDPBackend
+    from sentence_transformers import SentenceTransformer
+
+    TORCH_AVAILABLE = True
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    SentenceTransformer = None  # type: ignore[assignment]
+    TORCH_AVAILABLE = False
 
 SentenceEmbedding: TypeAlias = np.ndarray[tuple[int], np.dtype[np.float16]]
 
@@ -109,6 +122,13 @@ class Embedder:
         chunk_size: int = TOKEN_CHUNKSIZE,
         **kwargs,
     ):
+        if not TORCH_AVAILABLE:
+            raise ImportError(
+                "sentence-transformers/torch are not installed. Either install "
+                "the local extra (`pip install -e '.[local]'`) or use the "
+                "remote llama.cpp embedder via EMBEDDING_BASE_URL / "
+                "--embedding_url."
+            )
         torch.backends.cuda.preferred_rocm_fa_library("aotriton")
         self.model_name = model_name
         self.batch_size = batch_size
@@ -209,7 +229,7 @@ class Embedder:
     def get_max_input_length(self) -> int:
         return self.model.max_seq_length or 512
 
-    def get_tokenizer(self) -> PreTrainedTokenizerBase:
+    def get_tokenizer(self) -> "PreTrainedTokenizerBase":
         return self.model.tokenizer
 
     def set_batch_size(self, batch_size: int) -> None:

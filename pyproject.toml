@@ -3,23 +3,31 @@ name = "arxiv_vector_search"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
-  "sentence-transformers",
-  "torch[device-gfx1201]",
   "google-cloud-storage",
   "langchain-text-splitters",
   "SQLAlchemy",
   "pgvector",
   "psycopg[binary,pool]",
   "pymupdf",
-  "flash-attn",
   "packaging",
   "psutil",
-  "ninja",
-  "pip",
   "kagglehub[pandas-datasets]",
   "multiprocess",
   "dill",
-  "packaging",
+  "requests",
+  "numpy",
+]
+
+# Heavy local-GPU stack. The default (and recommended on a machine already
+# running llama-swap) path embeds via an OpenAI-compatible server with NO
+# torch install; install this extra only to embed in-process with
+# sentence-transformers.
+[project.optional-dependencies]
+local = [
+  "sentence-transformers",
+  "torch[device-gfx1201]",
+  "flash-attn",
+  "ninja",
   "bitsandbytes",
   "peft",
 ]
