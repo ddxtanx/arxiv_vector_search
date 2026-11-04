@@ -1,0 +1,23 @@
+[package]
+name = "pipeline"
+version = "0.1.0"
+edition = "2021"
+
+# Full-Rust rewrite of the arxiv_vector_search pipeline (embed, ingest,
+# query, rerank). See README (repo root) "Rust pipeline" section.
+
+[dependencies]
+fastsplit = { path = "../fastsplit" }
+clap = { version = "4", features = ["derive"] }
+postgres = "0.19"
+pgvector = { version = "0.4", features = ["halfvec", "postgres"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+anyhow = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
