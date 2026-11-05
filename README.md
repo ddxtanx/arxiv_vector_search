@@ -166,35 +166,6 @@ Env vars: `DATABASE_URL`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`,
 - A 6th cleanup pass scrubs control characters (legacy CM-font arXiv
   files emit them from every extractor).
 
-## Hybrid retrieval: reranking
-
-> **Note:** the Python path below stores a `text` column to rerank. The
-> Rust pipeline (`rust/`) implements the same feature **without storing
-> text** (it refetches chunk text from the PDFs at query time) — that is
-> the direction of record; the Python text column may be reverted pending
-> Garrett's call since Python is being retired in favor of the Rust
-> pipeline.
-
-The same llama-swap router can serve a cross-encoder reranker
-(`/rerank`, e.g. the `QwenReranking` section). Because reranking needs
-candidate chunk text at query time, the per-model embedding tables now
-store the chunk `text` column (added idempotently on next run; rows
-embedded before this change have NULL text and are skipped until
-re-embedded).
-
-```bash
-RERANK_MODEL=QwenReranking python -m arxiv_vector_search --query "..."
-# or --rerank_model QwenReranking --rerank_candidates 50
-```
-
-Flow: pgvector top-`--rerank_candidates` (default 50) -> cross-encoder
-re-scores query+chunk pairs -> reranked top 10 printed with both scores.
-Keep candidates ~50 and chunks under ~1500 tokens: the reranker slot ctx
-is 8192 per pair on this machine. llama.cpp's rerank JSON schema varies
-between builds; the client tries TEI style then Cohere style and parses
-both response shapes (`tools/probe_rerank.py`-style curl against the
-server shows which one your build serves).
-
 ## Experimental: Rust split engine (`--split_engine rust`)
 
 `rust/fastsplit/` is a rayon-parallel extract+split binary (pdf_oxide + a

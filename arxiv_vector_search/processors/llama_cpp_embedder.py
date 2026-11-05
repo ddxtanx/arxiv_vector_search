@@ -191,7 +191,6 @@ class RemoteEmbedder:
                 "page_index": split.page_index,
                 "chunk_index": split.chunk_index,
                 "embedding": embedding,
-                "text": split.text,
             }
             for split, embedding in zip(splits, embeddings)
         ]

@@ -2,7 +2,7 @@ import enum
 from typing import List
 
 from pgvector.sqlalchemy import HALFVEC
-from sqlalchemy import String, ForeignKey, SmallInteger, Index, Text
+from sqlalchemy import String, ForeignKey, SmallInteger, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from arxiv_vector_search.documents.document import DocumentType
 
@@ -67,10 +67,5 @@ def create_embedding_table(model_name: str, embedding_dim):
         "page_index": mapped_column(SmallInteger, primary_key=True),
         "chunk_index": mapped_column(SmallInteger, primary_key=True),
         "embedding": mapped_column(HALFVEC(embedding_dim), nullable=False),
-        # Chunk text is stored so query-time reranking (cross-encoder over
-        # vector-search candidates) is possible without re-downloading PDFs.
-        # Nullable: rows written before this column existed have no text and
-        # are skipped by the reranker until re-embedded.
-        "text": mapped_column(Text, nullable=True),
     }
     return type(f"Embedding_{safe_model_name}", (Base,), attrs)
