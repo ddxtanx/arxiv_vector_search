@@ -1,4 +1,4 @@
-from transformers import PreTrainedTokenizerBase
+from typing import TYPE_CHECKING
 from functools import lru_cache
 from arxiv_vector_search.documents.document import PagedDocument
 import traceback
@@ -11,9 +11,13 @@ from langchain_text_splitters import (
 )
 from multiprocess import get_context
 
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
+
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_CHUNK_OVERLAP = 0.15
 DEFAULT_CHUNK_FACTOR = 3.5
+DEFAULT_MIN_CHUNK_CHARS = 128  # minimum character length for a chunk to be embedded. This is to filter out very short chunks that may not be useful for embedding and just waste space and compute.
 
 
 class SplitError(BaseException):
@@ -59,8 +63,9 @@ class DocumentSplitter:
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
         chunk_factor: float = DEFAULT_CHUNK_FACTOR,
-        tokenizer: PreTrainedTokenizerBase | None = None,
+        tokenizer: "PreTrainedTokenizerBase | None" = None,
         prefix: str = "",
+        min_chunk_chars: int = DEFAULT_MIN_CHUNK_CHARS,
     ):
         if not chunk_size:
             chunk_size = DEFAULT_CHUNK_SIZE
@@ -68,6 +73,7 @@ class DocumentSplitter:
             chunk_overlap = int(chunk_size * DEFAULT_CHUNK_OVERLAP)
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.min_chunk_chars = min_chunk_chars
         self.prefix_length = len(prefix)
         kwargs = {
             "chunk_size": chunk_size,
@@ -131,6 +137,7 @@ class DocumentSplitter:
                     text=doc.page_content,
                 )
                 for i, doc in enumerate(chunks)
+                if len(doc.page_content.strip()) >= self.min_chunk_chars
             ]
         except Exception as e:
             print(

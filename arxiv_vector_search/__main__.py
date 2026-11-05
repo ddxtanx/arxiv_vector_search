@@ -6,9 +6,9 @@ from arxiv_vector_search.processors.embedder import (
     Embedder,
     TOKEN_OVERHEAD_FACTOR,
 )
+from arxiv_vector_search.processors.llama_cpp_embedder import RemoteEmbedder
 from arxiv_vector_search.db.tables import EmbeddingState
 from arxiv_vector_search.documents.document import DownloadedDocument, DocumentType
-from arxiv_vector_search.documents.arxiv import ArxivDownloader
 from .db import Database
 from .documents import DocumentDownloader
 import sys
@@ -17,8 +17,6 @@ from argparse import ArgumentParser, BooleanOptionalAction
 from dataclasses import dataclass
 import gc
 import codecs
-
-MIN_LEN = 128  # minimum character length for a chunk to be embedded. This is to filter out very short chunks that may not be useful for embedding and just waste space and compute.
 
 
 @dataclass
@@ -32,6 +30,9 @@ class Args:
     flush_errors: bool
     update_arxiv_metadata: bool
     add_docs_as_missing: bool
+    embedding_url: str
+    embedding_api_key: str
+    concurrency: int
 
 
 def unescaped_input(prompt: str) -> str:
@@ -79,6 +80,46 @@ if __name__ == "__main__":
         "--update_arxiv_metadata",
         action=BooleanOptionalAction,
         help="Whether to update state with the arxiv metadata json file.",
+    )
+    _ = parser.add_argument(
+        "--embedding_url",
+        type=str,
+        default=os.getenv("EMBEDDING_BASE_URL"),
+        help=(
+            "Base URL of an OpenAI-compatible embedding server (e.g. "
+            "http://127.0.0.1:8194/v1 served by llama.cpp/llama-swap). When "
+            "set, embeddings are requested over HTTP instead of locally with "
+            "torch. Also settable via EMBEDDING_BASE_URL."
+        ),
+    )
+    _ = parser.add_argument(
+        "--embedding_api_key",
+        type=str,
+        default=os.getenv("EMBEDDING_API_KEY"),
+        help="Optional API key for the embedding server (EMBEDDING_API_KEY).",
+    )
+    _ = parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help=(
+            "Concurrent embedding requests against a remote server "
+            "(EMBED_CONCURRENCY, default 4). Keep low if the server also "
+            "serves interactive traffic."
+        ),
+    )
+
+    _ = parser.add_argument(
+        "--split_engine",
+        type=str,
+        choices=["python", "rust"],
+        default="python",
+        help=(
+            "Document splitting engine. 'rust' uses the rayon-parallel "
+            "fastsplit binary (rust/fastsplit; ~2-3x faster on the extract+"
+            "split stage, character-based chunking only — build the binary "
+            "first). 'python' is the default MuPDF/langchain path."
+        ),
     )
 
     args: Args = parser.parse_args()
@@ -128,16 +169,34 @@ if __name__ == "__main__":
         if model_chunk_size_input.strip():
             model_chunk_size = int(model_chunk_size_input)
     else:
-        embedding_batch_size = next(
-            model.batch_size for model in models if model.name == args.model
+        # Reuse the settings stored when the model was first registered.
+        # Previously only batch_size was reused, so re-embedding with an
+        # existing model silently used different prefixes/chunk sizes than
+        # the rows already in the table.
+        model_row = next(m for m in models if m.name == args.model)
+        embedding_batch_size = model_row.batch_size
+        model_doc_prefix = model_row.document_prefix or ""
+        model_query_prefix = model_row.query_prefix or ""
+        model_chunk_size = model_row.chunk_size
+    if args.embedding_url:
+        embedder = RemoteEmbedder(
+            args.model,
+            base_url=args.embedding_url,
+            api_key=args.embedding_api_key,
+            batch_size=embedding_batch_size,
+            document_prefix=model_doc_prefix,
+            query_prefix=model_query_prefix,
+            chunk_size=model_chunk_size,
+            concurrency=args.concurrency,
         )
-    embedder = Embedder(
-        args.model,
-        embedding_batch_size,
-        document_prefix=model_doc_prefix,
-        query_prefix=model_query_prefix,
-        chunk_size=model_chunk_size,
-    )
+    else:
+        embedder = Embedder(
+            args.model,
+            embedding_batch_size,
+            document_prefix=model_doc_prefix,
+            query_prefix=model_query_prefix,
+            chunk_size=model_chunk_size,
+        )
     if args.model not in model_names_in_db:
         db.add_model(embedder)
     db.create_embedding_table_for_model(embedder)
@@ -169,15 +228,29 @@ if __name__ == "__main__":
         db.add_documents(documents)
 
     if args.embed:
+        # Imported lazily: this pulls in google-cloud-storage, which is only
+        # needed for the arXiv download path.
+        from arxiv_vector_search.documents.arxiv import ArxivDownloader
+
         db.add_missing_metadata(embedder)
         downloader = DocumentDownloader()
         arxiv_downloader = ArxivDownloader()
         downloader.register_downloader(DocumentType.ARXIV, arxiv_downloader)
-        splitter = DocumentSplitter(
-            embedder.chunk_size,
-            tokenizer=embedder.get_tokenizer(),
-            prefix=embedder.document_prefix,
-        )
+        if args.split_engine == "rust":
+            from arxiv_vector_search.processors.rust_splitter import RustSplitEngine
+
+            if embedder.get_tokenizer() is not None:
+                print(
+                    "Warning: the rust split engine chunks by characters only; "
+                    "a tokenizer is configured but will not be used for chunk sizing."
+                )
+            splitter = RustSplitEngine(chunk_size=embedder.chunk_size)
+        else:
+            splitter = DocumentSplitter(
+                embedder.chunk_size,
+                tokenizer=embedder.get_tokenizer(),
+                prefix=embedder.document_prefix,
+            )
         while True:
             batch = db.get_missing_embeddings_for_model(
                 embedder, limit=args.batch_size, offset=0

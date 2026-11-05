@@ -9,3 +9,4 @@ __pycache__
 *.pyc
 arxiv_vector_search_old.py
 tun*
+rust/**/target

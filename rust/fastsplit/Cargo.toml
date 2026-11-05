@@ -1,0 +1,16 @@
+[package]
+name = "fastsplit"
+version = "0.1.0"
+edition = "2021"
+
+# Experimental Rust twin of documents/document.py + processors/splitter.py:
+# PDF text extraction (pdf_oxide) + regex cleanup passes + the exact
+# langchain RecursiveCharacterTextSplitter semantics used by this repo,
+# parallelized across documents with rayon. One JSON object per chunk on
+# stdout (NDJSON), timing on stderr.
+
+[dependencies]
+pdf_oxide = "0.3"
+rayon = "1"
+serde_json = "1"
+

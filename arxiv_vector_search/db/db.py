@@ -2,6 +2,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy import exists
 from sqlalchemy import literal
 from sqlalchemy import func
+from sqlalchemy import text
 from sqlalchemy.orm import joinedload
 import numpy as np
 from .tables import (
@@ -12,7 +13,8 @@ from .tables import (
     Base,
     EmbeddingState,
 )
-from arxiv_vector_search.processors.embedder import Embedder, Embedding
+from arxiv_vector_search.processors.embedder import Embedding
+from arxiv_vector_search.processors.base import EmbedderLike
 from arxiv_vector_search.documents import Document as PdfDocument, DocumentType
 from arxiv_vector_search.documents.arxiv import ArxivDocument
 from arxiv_vector_search.documents.doi import DOIDocument
@@ -57,7 +59,7 @@ class Database:
             docs = session.execute(select(Document)).scalars().all()
             self.ident_to_doc_id_cache = {doc.identifier: doc.id for doc in docs}
 
-    def add_model(self, embedder: Embedder):
+    def add_model(self, embedder: EmbedderLike):
         with Session(self.engine) as session:
             session.execute(
                 insert(Model)
@@ -102,7 +104,7 @@ class Database:
             session.commit()
 
     def add_embedding_metadata(
-        self, document: PdfDocument, embedder: Embedder, state: EmbeddingState
+        self, document: PdfDocument, embedder: EmbedderLike, state: EmbeddingState
     ) -> EmbeddingMetadata:
         with Session(self.engine) as session:
             model = session.execute(
@@ -131,7 +133,7 @@ class Database:
                     pdf_docs.append(DOIDocument(doc.identifier))
             return pdf_docs
 
-    def create_embedding_table_for_model(self, embedder: Embedder):
+    def create_embedding_table_for_model(self, embedder: EmbedderLike):
         table = create_embedding_table(
             embedder.get_model_name(), embedder.get_embedding_dim()
         )
@@ -143,7 +145,7 @@ class Database:
             return session.execute(select(Model)).scalars().all()
 
     def get_embedding_metadata_by_model(
-        self, model: Embedder
+        self, model: EmbedderLike
     ) -> list[EmbeddingMetadata]:
         with Session(self.engine) as session:
             model_record = session.execute(
@@ -152,7 +154,7 @@ class Database:
             return model_record.embedding_metadatas
 
     def get_missing_embeddings_for_model(
-        self, model: Embedder, limit: int, offset: int
+        self, model: EmbedderLike, limit: int, offset: int
     ) -> list[PdfDocument]:
         with Session(self.engine) as session:
             model_record = session.execute(
@@ -180,7 +182,7 @@ class Database:
                     missing_docs.append(DOIDocument(doc.identifier))
             return missing_docs
 
-    def add_embeddings(self, embeddings: list[Embedding], embedder: Embedder):
+    def add_embeddings(self, embeddings: list[Embedding], embedder: EmbedderLike):
         if embedder.get_model_name() not in self.model_to_embedding_table:
             self.create_embedding_table_for_model(embedder)
         EmbeddingType = self.model_to_embedding_table.get(embedder.get_model_name())
@@ -194,13 +196,13 @@ class Database:
             ]
         with Session(self.engine) as session:
             session.execute(
-                insert(EmbeddingType),
+                insert(EmbeddingType).on_conflict_do_nothing(),
                 embeddings,
             )
             session.commit()
 
     def update_embedding_metadata_states_by_idents(
-        self, embedder: Embedder, doc_idents: list[str], state: EmbeddingState
+        self, embedder: EmbedderLike, doc_idents: list[str], state: EmbeddingState
     ):
         with Session(self.engine) as session:
             model_record = session.execute(
@@ -217,7 +219,7 @@ class Database:
             session.commit()
 
     def update_embedding_metadata_states(
-        self, embedder: Embedder, documents: list[PdfDocument], state: EmbeddingState
+        self, embedder: EmbedderLike, documents: list[PdfDocument], state: EmbeddingState
     ):
         with Session(self.engine) as session:
             model_record = session.execute(
@@ -255,7 +257,7 @@ class Database:
                 )
             session.commit()
 
-    def delete_embeddings_for_model(self, embedder: Embedder):
+    def delete_embeddings_for_model(self, embedder: EmbedderLike):
         with Session(self.engine) as session:
             model_record = session.execute(
                 select(Model).where(Model.name == embedder.get_model_name())
@@ -279,7 +281,7 @@ class Database:
                 del self.model_to_embedding_table[embedder.get_model_name()]
             session.commit()
 
-    def flush_errors_for_model(self, embedder: Embedder):
+    def flush_errors_for_model(self, embedder: EmbedderLike):
         with Session(self.engine) as session:
             model_record = session.execute(
                 select(Model).where(Model.name == embedder.get_model_name())
@@ -296,7 +298,7 @@ class Database:
             )
             session.commit()
 
-    def add_missing_metadata(self, embedder: Embedder):
+    def add_missing_metadata(self, embedder: EmbedderLike):
         with Session(self.engine) as session:
             model_record = session.execute(
                 select(Model).where(Model.name == embedder.get_model_name())
@@ -332,7 +334,7 @@ class Database:
 
     def query_embeddings(
         self,
-        embedder: Embedder,
+        embedder: EmbedderLike,
         query_embedding: np.ndarray[tuple[int], np.dtype[np.float16]],
         top_k: int,
     ) -> list[QueryResult]:
@@ -344,6 +346,13 @@ class Database:
         )
         with Session(self.engine) as session:
             print("Querying database for similar embeddings...")
+            # If an HNSW index exists (see tools/add_hnsw_index.py), pgvector's
+            # default ef_search (40) would silently truncate recall for
+            # top_k > 40. Size it to the request. Harmless when no index
+            # exists (exact scan ignores it).
+            session.execute(
+                text(f"SET LOCAL hnsw.ef_search = {max(100, int(top_k) * 2)}")
+            )
             results = session.execute(
                 select(EmbeddingType, Document, embedding_col)
                 .join(EmbeddingType.document)
@@ -372,7 +381,7 @@ class Database:
 
     def query_embeddings_avg_by_doc(
         self,
-        embedder: Embedder,
+        embedder: EmbedderLike,
         query_embedding: np.ndarray[tuple[int], np.dtype[np.float16]],
         top_k: int,
     ) -> list[QueryResult]:
@@ -384,6 +393,9 @@ class Database:
         ).label("distance")
         with Session(self.engine) as session:
             print("Querying database for similar embeddings...")
+            session.execute(
+                text(f"SET LOCAL hnsw.ef_search = {max(100, int(top_k) * 2)}")
+            )
             results = session.execute(
                 select(Document, distance_col)
                 .join(EmbeddingType, EmbeddingType.document_id == Document.id)
