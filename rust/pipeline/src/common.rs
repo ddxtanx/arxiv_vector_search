@@ -80,10 +80,10 @@ pub enum State {
 impl State {
     pub fn db_name(&self) -> &'static str {
         match self {
-            State::Missing => "MISSING",
-            State::DownloadError => "DOWNLOAD_ERROR",
-            State::SplitError => "SPLIT_ERROR",
-            State::Embedded => "EMBEDDED",
+            State::Missing => "missing",
+            State::DownloadError => "download_error",
+            State::SplitError => "split_error",
+            State::Embedded => "embedded",
         }
     }
 }

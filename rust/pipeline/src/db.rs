@@ -18,8 +18,16 @@ use pgvector::HalfVector;
 use postgres::{Client, NoTls};
 use std::collections::HashMap;
 
-/// (identifier, pdf_type, page_index, cosine_distance, chunk_text)
-pub type QueryHit = (String, DocumentType, i32, f64, String);
+/// One vector-search hit: which chunk of which document, and how close.
+/// No text here by design — chunk text is never stored; rerank callers
+/// re-derive it by re-extracting the source PDF (deterministic splitter).
+#[derive(Debug, Clone)]
+pub struct QueryHit {
+    pub identifier: String,
+    pub page_index: i32,
+    pub chunk_index: i32,
+    pub distance: f64,
+}
 
 pub struct ModelRow {
     pub id: i32,
@@ -35,6 +43,14 @@ pub struct ModelRow {
 pub struct Db {
     pub client: Client,
     pub model: Option<ModelRow>,
+}
+
+fn perr(ctx: &str, e: postgres::error::Error) -> String {
+    let mut out = format!("{ctx}: {e}");
+    if let Some(db) = e.as_db_error() {
+        out.push_str(&format!(" — {} ({:?})", db.message(), db.code()));
+    }
+    out
 }
 
 fn safe_table(model_name: &str) -> String {
@@ -53,7 +69,7 @@ pub fn embeddings_table(model_name: &str) -> String {
 
 impl Db {
     pub fn connect(db_url: &str) -> Result<Db, String> {
-        let client = Client::connect(db_url, NoTls).map_err(|e| format!("db connect: {e}"))?;
+        let client = Client::connect(db_url, NoTls).map_err(|e| perr("db connect", e))?;
         let mut db = Db {
             client,
             model: None,
@@ -92,7 +108,7 @@ impl Db {
                  CREATE INDEX IF NOT EXISTS idx_doc_states_model_state
                      ON doc_states (model_id, state);",
             )
-            .map_err(|e| format!("schema: {e}"))?;
+            .map_err(|e| perr("schema", e))?;
         Ok(())
     }
 
@@ -136,7 +152,7 @@ impl Db {
                     &base_url,
                 ],
             )
-            .map_err(|e| format!("model insert: {e}"))?;
+            .map_err(|e| perr("model insert", e))?;
         let row = self
             .client
             .query_one(
@@ -144,7 +160,7 @@ impl Db {
                         document_prefix, query_prefix FROM models WHERE name = $1",
                 &[&name],
             )
-            .map_err(|e| format!("model select: {e}"))?;
+            .map_err(|e| perr("model select", e))?;
         let m = ModelRow {
             id: row.get("id"),
             name: row.get("name"),
@@ -185,15 +201,14 @@ impl Db {
                      page_index SMALLINT NOT NULL,
                      chunk_index SMALLINT NOT NULL,
                      embedding HALFVEC({}) NOT NULL,
-                     text TEXT NOT NULL,
                      PRIMARY KEY (document_id, page_index, chunk_index)
                  );
                  CREATE INDEX IF NOT EXISTS ix_{table}_doc ON {table} (document_id);
                  CREATE INDEX IF NOT EXISTS ix_{table}_hnsw
-                     ON {table} USING hnsw (embedding vector_cosine_ops);",
+                     ON {table} USING hnsw (embedding halfvec_cosine_ops);",
                 m.embedding_dim
             ))
-            .map_err(|e| format!("create embedding table: {e}"))?;
+            .map_err(|e| perr("create embedding table", e))?;
         Ok(())
     }
 
@@ -208,7 +223,7 @@ impl Db {
                      ON CONFLICT (identifier) DO NOTHING",
                     &[&d.identifier, &d.pdf_type.db_name()],
                 )
-                .map_err(|e| format!("add_documents: {e}"))?;
+                .map_err(|e| perr("add_documents", e))?;
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
@@ -227,7 +242,7 @@ impl Db {
                  ON CONFLICT DO NOTHING",
                 &[&m],
             )
-            .map_err(|e| format!("add_missing_states: {e}"))?;
+            .map_err(|e| perr("add_missing_states", e))?;
         Ok(())
     }
 
@@ -270,7 +285,7 @@ impl Db {
                        (SELECT id FROM documents WHERE identifier = ANY($2))",
                     &[&m, &chunk, &state.db_name(), &error],
                 )
-                .map_err(|e| format!("set_states: {e}"))?;
+                .map_err(|e| perr("set_states", e))?;
         }
         Ok(())
     }
@@ -290,12 +305,12 @@ impl Db {
     pub fn add_embeddings(
         &mut self,
         ident_map: &HashMap<String, i64>,
-        rows: &[(String, i32, i32, Vec<f32>, String)],
+        rows: &[(String, i32, i32, Vec<f32>)],
     ) -> Result<(), String> {
         let table = embeddings_table(&self.model().name);
         for chunk in rows.chunks(500) {
             let mut tx = self.client.transaction().map_err(|e| e.to_string())?;
-            for (ident, page, chunk_i, vec, text) in chunk {
+            for (ident, page, chunk_i, vec) in chunk {
                 let doc_id = match ident_map.get(ident) {
                     Some(id) => *id,
                     None => continue,
@@ -303,12 +318,12 @@ impl Db {
                 let v = HalfVector::from_f32_slice(vec);
                 tx.execute(
                     &format!(
-                        "INSERT INTO {table} (document_id, page_index, chunk_index, embedding, text)
-                         VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING"
+                        "INSERT INTO {table} (document_id, page_index, chunk_index, embedding)
+                         VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING"
                     ),
-                    &[&doc_id, page, chunk_i, &v, text],
+                    &[&doc_id, &(*page as i16), &(*chunk_i as i16), &v],
                 )
-                .map_err(|e| format!("add_embeddings: {e}"))?;
+                .map_err(|e| perr("add_embeddings", e))?;
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
@@ -318,15 +333,15 @@ impl Db {
     pub fn query_embeddings(&mut self, query: &[f32], top_k: i64) -> Result<Vec<QueryHit>, String> {
         let table = embeddings_table(&self.model().name);
         let q = HalfVector::from_f32_slice(query);
-        let ef = (top_k as usize * 2).max(100);
+        let ef = (top_k as usize * 2).clamp(100, 1000); // pgvector caps ef_search at 1000
         let mut tx = self.client.transaction().map_err(|e| e.to_string())?;
         tx.execute(&format!("SET LOCAL hnsw.ef_search = {ef}"), &[])
             .map_err(|e| e.to_string())?;
         let rows = tx
             .query(
                 &format!(
-                    "SELECT d.identifier, d.pdf_type, e.page_index,
-                            e.embedding <=> $1 AS distance, e.text
+                    "SELECT d.identifier, e.page_index, e.chunk_index,
+                            e.embedding <=> $1 AS distance
                      FROM {table} e JOIN documents d ON d.id = e.document_id
                      ORDER BY e.embedding <=> $1 LIMIT $2"
                 ),
@@ -337,49 +352,14 @@ impl Db {
         Ok(rows
             .iter()
             .map(|r| {
-                (
-                    r.get("identifier"),
-                    DocumentType::from_db_name(r.get("pdf_type")),
-                    r.get("page_index"),
-                    r.get("distance"),
-                    r.get("text"),
-                )
-            })
-            .collect())
-    }
-
-    pub fn query_avg_by_doc(
-        &mut self,
-        query: &[f32],
-        top_k: i64,
-    ) -> Result<Vec<(String, DocumentType, f64)>, String> {
-        let table = embeddings_table(&self.model().name);
-        let q = HalfVector::from_f32_slice(query);
-        let ef = (top_k as usize * 2).max(100);
-        let mut tx = self.client.transaction().map_err(|e| e.to_string())?;
-        tx.execute(&format!("SET LOCAL hnsw.ef_search = {ef}"), &[])
-            .map_err(|e| e.to_string())?;
-        let rows = tx
-            .query(
-                &format!(
-                    "SELECT d.identifier, d.pdf_type,
-                            avg(e.embedding <=> $1) AS distance
-                     FROM {table} e JOIN documents d ON d.id = e.document_id
-                     GROUP BY d.id, d.identifier, d.pdf_type
-                     ORDER BY distance LIMIT $2"
-                ),
-                &[&q, &top_k],
-            )
-            .map_err(|e| e.to_string())?;
-        tx.commit().map_err(|e| e.to_string())?;
-        Ok(rows
-            .iter()
-            .map(|r| {
-                (
-                    r.get("identifier"),
-                    DocumentType::from_db_name(r.get("pdf_type")),
-                    r.get("distance"),
-                )
+                let page: i16 = r.get("page_index");
+                let chunk: i16 = r.get("chunk_index");
+                QueryHit {
+                    identifier: r.get("identifier"),
+                    page_index: page as i32,
+                    chunk_index: chunk as i32,
+                    distance: r.get("distance"),
+                }
             })
             .collect())
     }

@@ -7,6 +7,7 @@ mod downloader;
 mod embedder;
 mod metadata;
 mod reranker;
+mod scoring;
 
 use clap::Parser;
 use common::{Document, DocumentType, State};
@@ -49,6 +50,10 @@ struct Cli {
     rerank_model: Option<String>,
     #[arg(long = "rerank_candidates", default_value_t = 50)]
     rerank_candidates: usize,
+    #[arg(long = "doc_score", default_value = "topk")]
+    doc_score: String,
+    #[arg(long = "score_topk", default_value_t = 5)]
+    score_topk: usize,
     #[arg(long = "chunk_size", default_value_t = 512)]
     chunk_size: i32,
     #[arg(long = "chunk_overlap")]
@@ -321,10 +326,10 @@ fn run_embed(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli) {
 
         // Phase 4: store + state transitions.
         let ident_map = db.warm_ids(&idents).expect("warm_ids");
-        let rows: Vec<(String, i32, i32, Vec<f32>, String)> = chunks
+        let rows: Vec<(String, i32, i32, Vec<f32>)> = chunks
             .into_iter()
             .zip(vectors)
-            .map(|((ident, page, chunk_i, text), vec)| (ident, page, chunk_i, vec, text))
+            .map(|((ident, page, chunk_i, _text), vec)| (ident, page, chunk_i, vec))
             .collect();
         db.add_embeddings(&ident_map, &rows)
             .expect("add_embeddings");
@@ -351,6 +356,59 @@ fn run_embed(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli) {
     }
 }
 
+fn doc_url(id: &str) -> String {
+    Document {
+        identifier: id.to_string(),
+        pdf_type: DocumentType::Arxiv,
+    }
+    .url()
+}
+
+fn chunk_params(model: &db::ModelRow) -> fastsplit::Params {
+    fastsplit::Params {
+        chunk_size: (model.chunk_size as f64 * CHUNK_CHAR_FACTOR) as usize,
+        chunk_overlap: (model.chunk_overlap as f64 * CHUNK_CHAR_FACTOR) as usize,
+        min_chunk_chars: MIN_CHUNK_CHARS,
+    }
+}
+
+/// Re-derive chunk texts for hits by (re)downloading the source PDFs and
+/// re-running the deterministic splitter. Chunk text is deliberately NOT
+/// stored in the DB (storage: text ~= the size of the vectors themselves);
+/// chunk indices are stable as long as the same extractor + splitter
+/// params (persisted in the model row) are used.
+fn refetch_chunk_texts(
+    cli: &Cli,
+    model: &db::ModelRow,
+    hits: &[db::QueryHit],
+    threads: usize,
+) -> std::collections::HashMap<(String, i32, i32), String> {
+    let mut uniq: Vec<String> = hits.iter().map(|h| h.identifier.clone()).collect();
+    uniq.sort();
+    uniq.dedup();
+    let docs: Vec<Document> = uniq.iter().map(|id| Document::arxiv(id.clone())).collect();
+    let dl = Downloader::new(&cli.dl_path);
+    let results = dl.download_all(&docs, threads * 4, true);
+    let files: Vec<(String, String)> = results
+        .iter()
+        .filter_map(|(id, o)| match o {
+            downloader::DownloadOutcome::Downloaded(p) => {
+                Some((id.clone(), p.to_string_lossy().to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut map = std::collections::HashMap::new();
+    for (id, res) in fastsplit::extract_documents_parallel(&files, &chunk_params(model), threads) {
+        if let Ok(cs) = res {
+            for c in cs {
+                map.insert((id.clone(), c.page_index, c.chunk_index as i32), c.text);
+            }
+        }
+    }
+    map
+}
+
 fn run_query(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli, q: &str) {
     let qvec = match embedder.embed(&[q.to_string()], &db.model().query_prefix) {
         Ok(mut v) => v.pop().unwrap(),
@@ -359,87 +417,112 @@ fn run_query(db: &mut Db, embedder: &RemoteEmbedder, cli: &Cli, q: &str) {
             std::process::exit(1);
         }
     };
-
-    if let Some(rmodel) = cli
+    let method = match scoring::DocScoreMethod::parse(&cli.doc_score) {
+        Some(m) => m,
+        None => {
+            eprintln!(
+                "unknown --doc_score '{}' (use max|mean|topk|noisy_or)",
+                cli.doc_score
+            );
+            std::process::exit(1);
+        }
+    };
+    let rerank_model = cli
         .rerank_model
         .clone()
-        .or_else(|| std::env::var("RERANK_MODEL").ok())
-    {
+        .or_else(|| std::env::var("RERANK_MODEL").ok());
+    let fetch_k = if rerank_model.is_some() {
+        (cli.rerank_candidates as i64).max(50)
+    } else {
+        1000
+    };
+    let hits = db.query_embeddings(&qvec, fetch_k).expect("vector query");
+
+    // (identifier, page, chunk, score, vec_distance); score starts as
+    // vector similarity (1 - cosine distance, clamped to [0,1]).
+    let mut scored: Vec<(String, i32, i32, f64, f64)> = hits
+        .iter()
+        .map(|h| {
+            (
+                h.identifier.clone(),
+                h.page_index,
+                h.chunk_index,
+                (1.0 - h.distance).clamp(0.0, 1.0),
+                h.distance,
+            )
+        })
+        .collect();
+
+    if let Some(rmodel) = &rerank_model {
         let reranker = RemoteReranker::new(
-            &rmodel,
+            rmodel,
             cli.embedding_url.as_deref(),
             cli.embedding_api_key
                 .clone()
                 .or_else(|| std::env::var("EMBEDDING_API_KEY").ok()),
         );
-        let candidates = db
-            .query_embeddings(&qvec, cli.rerank_candidates as i64)
-            .expect("query");
-        let texts: Vec<String> = candidates.iter().map(|c| c.4.clone()).collect();
-        match reranker.rerank(q, &texts) {
+        let t0 = std::time::Instant::now();
+        let texts = refetch_chunk_texts(cli, db.model(), &hits, cli.threads);
+        eprintln!(
+            "refetched {} chunk texts in {:?} (re-extracted from PDFs; text is not stored in the DB)",
+            texts.len(),
+            t0.elapsed()
+        );
+        let cand: Vec<usize> = (0..scored.len())
+            .filter(|i| texts.contains_key(&(scored[*i].0.clone(), scored[*i].1, scored[*i].2)))
+            .collect();
+        let cand_texts: Vec<String> = cand
+            .iter()
+            .map(|i| texts[&(scored[*i].0.clone(), scored[*i].1, scored[*i].2)].clone())
+            .collect();
+        match reranker.rerank(q, &cand_texts) {
             Ok(order) => {
-                println!(
-                    "\nTop {} results after reranking {} candidates:",
-                    order.len().min(10),
-                    candidates.len()
-                );
-                for (rank, (ci, score)) in order.iter().take(10).enumerate() {
-                    let (ident, _t, page, dist, _) = &candidates[*ci];
+                for (ci, score) in order {
+                    if let Some(&i) = cand.get(ci) {
+                        scored[i].3 = score as f64;
+                    }
+                }
+                let mut by_score = scored.clone();
+                by_score.sort_by(|a, b| b.3.total_cmp(&a.3));
+                println!("\nTop blocks after cross-encoder rerank on refetched text:");
+                for (rank, (id, page, _c, s, dist)) in by_score.iter().take(10).enumerate() {
                     println!(
-                        "{:>2}. {} p{} rerank={:.4} vec_dist={:.4}",
+                        "{:>2}. {} p{} score={:.4} vec_dist={:.4}",
                         rank + 1,
-                        Document {
-                            identifier: ident.clone(),
-                            pdf_type: DocumentType::Arxiv
-                        }
-                        .url(),
+                        doc_url(id),
                         page,
-                        score,
+                        s,
                         dist
                     );
                 }
             }
-            Err(e) => eprintln!("reranking failed: {e} (showing vector-only results)"),
+            Err(e) => eprintln!("reranking failed: {e} (falling back to vector scores)"),
         }
     }
 
-    let results = db.query_embeddings(&qvec, 1000).expect("query");
-    let mut by_ident: std::collections::HashMap<String, (f64, Vec<i32>)> =
-        std::collections::HashMap::new();
-    for (ident, _t, page, dist, _) in &results {
-        let e = by_ident
-            .entry(ident.clone())
-            .or_insert_with(|| (*dist, Vec::new()));
-        e.0 = e.0.min(*dist);
-        e.1.push(*page);
+    // Document-level aggregation (chunk scores -> one score per document).
+    let mut by_doc: std::collections::HashMap<String, Vec<f64>> = std::collections::HashMap::new();
+    for (id, _p, _c, s, _d) in &scored {
+        by_doc.entry(id.clone()).or_default().push(*s);
     }
-    let mut ranked: Vec<(&String, (f64, Vec<i32>))> =
-        by_ident.iter().map(|(k, v)| (k, v.clone())).collect();
-    ranked.sort_by(|a, b| a.1 .0.total_cmp(&b.1 .0));
-    println!("\nTop 10 results sorted by minimum distance:");
-    for (ident, (dist, pages)) in ranked.iter().take(10) {
-        let mut pages = pages.clone();
-        pages.sort_unstable();
-        pages.dedup();
-        println!(
-            "URL: {}, Min Distance: {dist:.4}, Pages: {pages:?}",
-            Document {
-                identifier: ident.to_string(),
-                pdf_type: DocumentType::Arxiv
-            }
-            .url()
-        );
-    }
-    let avg = db.query_avg_by_doc(&qvec, 10).expect("avg query");
-    println!("\nTop 10 results sorted by average distance:");
-    for (ident, t, dist) in avg {
-        println!(
-            "URL: {}, Avg Distance: {dist:.4}",
-            Document {
-                identifier: ident,
-                pdf_type: t
-            }
-            .url()
-        );
+    let mut ranked: Vec<(String, f64, usize)> = by_doc
+        .iter()
+        .map(|(id, v)| {
+            (
+                id.clone(),
+                scoring::doc_score(v, method, cli.score_topk),
+                v.len(),
+            )
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    println!(
+        "\nDocuments ranked by {}(k={}) of {} candidate chunk scores:",
+        cli.doc_score,
+        cli.score_topk,
+        scored.len()
+    );
+    for (i, (id, s, n)) in ranked.iter().take(10).enumerate() {
+        println!("{:>2}. score={:.4} chunks={} {}", i + 1, s, n, doc_url(id));
     }
 }

@@ -103,10 +103,12 @@ Env vars: `DATABASE_URL`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`,
 - `doc_states(document_id, model_id, state, error_message, updated_at)` with
   **PRIMARY KEY (document_id, model_id)** — the Python layer allowed
   duplicate state rows; failures now keep their `error_message`.
-- `embeddings_<model>(document_id, page_index, chunk_index, embedding
-  halfvec, text)` — text is **NOT NULL** (reranking is a first-class
-  feature); table is created **with its HNSW cosine index** (no separate
-  indexing tool); FKs use `ON DELETE CASCADE`.
+- `embeddings_<model>(document_id, page_index, chunk_index,
+  embedding halfvec)` — **no chunk text column**: text is roughly the
+  same size as the vectors and does not belong in the DB. Reranking
+  **refetches** it (see below). The table is created **with its HNSW
+  cosine index** (`halfvec_cosine_ops`; no separate indexing tool); FKs
+  use `ON DELETE CASCADE`.
 - state values are lowercase (`missing`, `download_error`, `split_error`,
   `embedded`) instead of SQLAlchemy enum names.
 
@@ -120,20 +122,37 @@ Env vars: `DATABASE_URL`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`,
   HTTPS — no google-cloud SDK, no credentials.
 - **SET LOCAL hnsw.ef_search runs inside a transaction** — in the Python
   layer it was a silent no-op outside autocommit (real recall bug).
+- **Refetch instead of store for reranking**: rerank candidates get their
+  text by re-downloading (or reading the local `--dl_path` cache) the
+  candidate PDFs and re-running the deterministic splitter with the
+  model row's stored chunk params; `chunk_index` maps hit -> text. Cold
+  (10 fresh PDFs) ~1.8s; warm cache ~0.9s.
+- **Pluggable document scoring** (`--doc_score`, `--score_topk`): chunk
+  scores aggregate to a document score via `topk` (default, mean of the
+  best k=5 chunks), `mean`, `max` (old min-distance), or `noisy_or`
+  (probabilistic union; sensible only on reranker-calibrated scores).
+  Why topk: `mean` dilutes long docs (measured: the true match fell to
+  4th on an 88-chunk corpus), `max` is gamed by any long doc with one
+  lucky chunk; topk rewards multiple relevant passages and is
+  length-neutral once len>=k.
 - Multi-row transactional inserts (500/txn), rayon extract+split
   (byte-parity with langchunking proven by `tools/validate_fastsplit.py`),
   retry/backoff on GCS and embedding transport, stored error messages for
   failed docs (`--flush_errors` re-queues them).
 
 ### Verification status
-- Unit/integration: chunker parity (2,942 chunks / 0 mismatches), embedder
-  + reranker + downloader + metadata tests via mock servers and live GCS
-  downloads (`cargo test` in `rust/`).
-- End-to-end on real Postgres+pgvector + llama-swap: run on the host (the
-  dev sandbox has no Postgres server). Suggested smoke test:
-  `--embed --batch_size 20` against the llama-swap router (seed a handful
-  of documents with a one-off `INSERT INTO documents ...`), then
-  `--query`.
+- Unit/integration: **24 Rust tests** — chunker parity re-verified
+  (**129 docs / 5,581 chunks / 0 mismatches**, incl. legacy pre-2007
+  CM-font files), embedder/reranker/metadata against mock HTTP servers,
+  downloader against live GCS.
+- **Live end-to-end in the dev sandbox** against real Postgres 18.6 +
+  pgvector 0.8.7 and a deterministic stand-in for llama-swap: 10 arXiv
+  papers (legacy + modern) ingested (download -> split -> embed ->
+  halfvec + HNSW), reranked query (vector top-50 -> refetch 369 chunk
+  texts -> cross-encoder scores -> topk aggregation), scoring-method
+  comparison, state transitions + idempotent re-runs. The one component
+  not exercised for real is llama.cpp model inference — run
+  `--embed/--query` against your llama-swap on :8194 for that.
 
 ## Notes
 
@@ -148,6 +167,13 @@ Env vars: `DATABASE_URL`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`,
   files emit them from every extractor).
 
 ## Hybrid retrieval: reranking
+
+> **Note:** the Python path below stores a `text` column to rerank. The
+> Rust pipeline (`rust/`) implements the same feature **without storing
+> text** (it refetches chunk text from the PDFs at query time) — that is
+> the direction of record; the Python text column may be reverted pending
+> Garrett's call since Python is being retired in favor of the Rust
+> pipeline.
 
 The same llama-swap router can serve a cross-encoder reranker
 (`/rerank`, e.g. the `QwenReranking` section). Because reranking needs
